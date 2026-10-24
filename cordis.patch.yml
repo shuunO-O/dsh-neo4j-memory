@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-neo4j-memory
+      name: dsh-neo4j-memory

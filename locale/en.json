@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Neo4j Memory",
+    "description": "Long-term graph memory with a local Neo4j runtime downloaded on first use, exposed as save and search tools."
+  }
+}

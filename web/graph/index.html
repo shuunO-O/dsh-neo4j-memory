@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Neo4j 记忆图谱</title><link rel="stylesheet" href="style.css"></head>
+<body data-theme="dark">
+<div class="shell"><main>
+<header>
+  <div class="identity"><div class="brand" aria-hidden="true">n<span>·</span></div><div><div class="eyebrow">NEO4J <span>/</span> MEMORY GRAPH</div><h1>记忆图谱</h1></div><span class="preview">数据来源 <span id="sourceBadge">Neo4j</span></span></div>
+  <div class="header-actions"><button id="themeToggle" class="icon-button" aria-label="切换浅色主题" title="切换浅色主题">☼</button><button id="refreshGraph" class="quiet-button">刷新</button><button id="exportGraph" class="quiet-button">导出</button><button id="importGraph" class="primary-button"><span aria-hidden="true">＋</span> 导入图谱</button><button id="cancelImport" hidden>取消计算</button></div>
+</header>
+<div class="workspace">
+<section class="map-area" aria-label="图谱画布">
+  <div class="canvas-top"><div class="search-wrap"><svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" placeholder="寻找一段记忆，或一个熟悉的名字" aria-label="搜索节点" autocomplete="off"><kbd>/</kbd><div id="results" hidden></div></div>
+  <details id="viewSettings" class="settings"><summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></svg>显示设置</summary><div class="settings-panel"><div class="settings-title">图谱显示</div><label class="select-label">中心人物 <select id="centerPerson" aria-label="中心人物"><option value="auto">自动选择</option></select></label><label class="edge-label">连线强度 <input id="strength" type="range" min="10" max="65" value="29" aria-label="连线强度"></label><label class="hub-label"><span>星空与平滑镜头动效</span><input id="motion" type="checkbox" checked></label><label class="hub-label"><span>降低共同人物的布局影响</span><input id="hubCorrection" type="checkbox" checked></label><div class="settings-title">节点类型（Neo4j）</div><div id="labelFilters"><label class="hub-label"><span>事件</span><input type="checkbox" value="Event" checked></label><label class="hub-label"><span>人物</span><input type="checkbox" value="Person" checked></label><label class="hub-label"><span>概念</span><input type="checkbox" value="Concept" checked></label><label class="hub-label"><span>地点</span><input type="checkbox" value="Location" checked></label></div><button id="dataHelp" class="quiet-button">导入与导出说明 ↗</button><div id="analysisStatus" class="analysis-status"></div><details class="diagnostics"><summary>分区计算信息</summary><div id="diagnosticValues"></div></details></div></details></div>
+  <div class="nebula" aria-hidden="true"></div>
+  <svg id="starfield" viewBox="0 0 1120 800" preserveAspectRatio="xMidYMid slice" aria-hidden="true"></svg>
+  <div class="meteor" aria-hidden="true"></div><div class="meteor meteor-two" aria-hidden="true"></div>
+  <div class="canvas-caption"><span class="live-dot"></span><span id="count"></span><span id="groupCount"></span></div>
+  <canvas id="graphCanvas" aria-hidden="true"></canvas>
+  <div class="grain" aria-hidden="true"></div>
+  <svg id="map" viewBox="0 0 1120 800" aria-label="记忆关系图，可拖动和缩放"><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="14" refY="3.5" orient="auto"><path d="M0,1 L5,3.5 L0,6" fill="none" stroke="currentColor" stroke-width="1"/></marker><radialGradient id="clusterMist"><stop offset="0" stop-color="#a4bdcf" stop-opacity=".06"/><stop offset=".72" stop-color="#8dacc4" stop-opacity=".025"/><stop offset="1" stop-color="#8dacc4" stop-opacity="0"/></radialGradient></defs><g id="viewport"><g id="halos"></g><g id="edges"></g><g id="nodes"></g><g id="labels"></g></g></svg>
+  <div id="tooltip" role="tooltip" hidden></div><div id="emptyState" hidden>正在加载记忆图谱…<small>读取节点与连接后，在本地计算布局。</small></div>
+  <div class="canvas-bottom"><div class="legend"><span><i style="--c:#7fd6ba"></i>概念</span><span><i style="--c:#e9bb72"></i>事件</span><span><i class="ring" style="--c:#b6a9ef"></i>人物</span><span><i class="square" style="--c:#e5a4ba"></i>地点</span></div><div class="zoom"><button id="minus" aria-label="缩小">−</button><output id="zoomValue">100%</output><button id="plus" aria-label="放大">＋</button><span></span><button id="fit" title="适应画布">⤢</button></div></div>
+  <aside id="detail" aria-label="节点详情"></aside>
+</section>
+</div>
+<footer><span id="dataStatus" role="status" aria-live="polite">所有节点与连接均保留</span><span class="gesture-hint">拖动探索 <span>·</span> 滚轮缩放 <span>·</span> 点击查看详情</span><span class="local-indicator"><i></i> 本地处理</span></footer>
+<input id="graphFile" type="file" accept=".json,application/json,.dump" hidden>
+</main></div>
+<dialog id="importHelp"><div class="help-heading"><h2>导入与导出图谱</h2><button id="closeHelp" aria-label="关闭导入说明">×</button></div><p>页面默认读取插件后端当前的 Neo4j 记忆图谱。点击“刷新”可重新读取；显示设置中的节点类型只筛选当前视图。</p><p>支持包含 nodes 与 relationships 的 JSON，也支持保存的 记忆图谱接口完整响应。若手头只有 .dump 文件，需要先在独立 Neo4j 实例恢复，再导出为图谱 JSON。</p><p>导入仅替换当前浏览器视图，不写回 Neo4j。点击“刷新”或重新打开页面即可返回当前记忆图谱。导出 JSON 可再次导入查看，不能代替数据库备份。</p><p class="aside-note">当前支持最多 3,000 个节点、20,000 条关系和 20 MB 的导入文件。超限会提示，不会截断图谱；可通过节点类型减少从 Neo4j 读取的范围。</p></dialog>
+
+<script src="graph-io.js"></script><script src="radial-layout.js"></script><script src="graph-engine.js"></script><script src="graph-renderer.js"></script><script src="app.js"></script>
+</body></html>

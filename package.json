@@ -1,0 +1,100 @@
+{
+  "name": "dsh-neo4j-memory",
+  "version": "0.6.0",
+  "description": "Community Neo4j graph-memory plugin for DeepSeek Harness on Windows: events, people, concepts and places, with a local runtime, settings UI and read-only graph viewer",
+  "license": "MIT",
+  "author": {
+    "name": "shuunO-O",
+    "url": "https://github.com/shuunO-O"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shuunO-O/dsh-neo4j-memory.git"
+  },
+  "homepage": "https://github.com/shuunO-O/dsh-neo4j-memory#readme",
+  "bugs": {
+    "url": "https://github.com/shuunO-O/dsh-neo4j-memory/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "neo4j",
+    "graph-memory",
+    "long-term-memory",
+    "agent-memory",
+    "knowledge-graph"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "graph-server.js",
+    "hostdeps.js",
+    "web",
+    "bridge.js",
+    "lib",
+    "assets",
+    "src",
+    "tsconfig.json",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "selfcheck.mjs"
+  ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-tools": ">=0.2.1-rc.2 <0.3.0",
+    "@deepseek-ai/schemastery": "^3.18.5"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "dependencies": {
+    "neo4j-driver": "6.2.0",
+    "proper-lockfile": "4.1.2",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/yauzl": "2.10.3",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "selfcheck": "node selfcheck.mjs",
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && node selfcheck.mjs && node tests/backend.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test tests/*.test.mjs"
+  }
+}

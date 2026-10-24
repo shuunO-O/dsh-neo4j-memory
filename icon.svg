@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Neo4j Memory">
+  <rect width="64" height="64" rx="14" fill="#12313f"/>
+  <path d="M20 21 L44 20 M20 21 L31 43 M44 20 L49 41 M31 43 L49 41" stroke="#4fd1c5" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <circle cx="20" cy="21" r="6" fill="#4fd1c5"/>
+  <circle cx="44" cy="20" r="4.5" fill="#8be9c7"/>
+  <circle cx="31" cy="43" r="5" fill="#2f9e8f"/>
+  <circle cx="49" cy="41" r="6.5" fill="#4fd1c5"/>
+  <circle cx="31" cy="43" r="1.8" fill="#12313f"/>
+</svg>

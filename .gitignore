@@ -1,0 +1,14 @@
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+*.tgz
+.env
+# Local Neo4j/JRE test runtime; never committed and never included in the npm package.
+runtime/
+tmp/
+backup/
+# Optional local memory database, for when the default %LOCALAPPDATA% path is not writable.
+.localdb/

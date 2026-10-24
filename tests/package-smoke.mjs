@@ -1,0 +1,14 @@
+import assert from 'node:assert/strict';
+import { readFile, access } from 'node:fs/promises';
+import { resolve, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+const root = resolve('tmp/package-smoke/node_modules/dsh-neo4j-memory');
+const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
+assert.equal(pkg.version, '0.6.0');
+const plugin = await import(pathToFileURL(join(root, 'index.js')));
+assert.equal(plugin.name, 'dsh-neo4j-memory');
+const { MemoryConfig } = await import(pathToFileURL(join(root, 'lib/config.js')));
+assert.equal(MemoryConfig.fromEnvironment({}, { EMBEDDING_API_KEY: 'fixture' }).embeddingApiKey, 'fixture');
+for (const file of ['lib/service.js', 'lib/runtime.js', 'assets/windows-guardian.ps1', 'assets/extraction_prompt.md']) await access(join(root, file));
+await assert.rejects(access(join(root, 'python')));
+console.log('Packed plugin loads with production npm dependencies; no Python backend is included.');
