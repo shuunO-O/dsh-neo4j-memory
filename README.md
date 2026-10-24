@@ -21,6 +21,16 @@
 - Key、端点、模型、阈值、维度保存后下一次调用生效
 - 节点 ID 按类型自增：`event_1`、`person_2`、`concept_3`……
 
+## 效果
+
+以下截图由一段合成对话生成，人物、地点与数值均为虚构。
+
+<img src="docs/images/graph-overview.png" width="1200" alt="记忆图谱总览：事件、人物、概念与地点的关系">
+
+点击节点查看属性与一跳关系：
+
+<img src="docs/images/graph-node.png" width="1200" alt="节点详情：属性与关联关系">
+
 ## 要求
 
 - Windows 10/11 x64
