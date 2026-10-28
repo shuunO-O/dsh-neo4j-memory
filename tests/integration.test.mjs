@@ -51,10 +51,10 @@ test('real Neo4j: legacy data, model HTTP, aligned writes, filtered/vector searc
   const savedId = saved.event_id;
   await service.store.run("MATCH (e:Event {id:$id}) SET e.create_time='2026-10-24T10:30:00.123456'", { id: savedId });
   const vector = await service.call('memory_database_search', { query_text: '编程学习' });
-  assert.equal(vector.data.primary_match.node.id, savedId); assert.ok(vector.data.primary_match.context.persons.some(p => p.name === '兼容用户'));
-  const filtered = await service.call('memory_database_search', { entity_filter: 'TS', time_hint: '2026-10-24' });
-  assert.equal(filtered.data.primary_match.node.id, savedId);
-  const empty = await service.call('memory_database_search', { entity_filter: 'missing' }); assert.equal(empty.data.primary_match, null);
+  assert.equal(vector.data.events[0].id, savedId); assert.ok(vector.data.events[0].quote.text.includes('兼容用户'));
+  const filtered = await service.call('memory_database_search', { entity_filter: 'TS', time_hint: '2026-10-24', reset_seen: true });
+  assert.equal(filtered.data.events[0].id, savedId);
+  const empty = await service.call('memory_database_search', { entity_filter: 'missing' }); assert.deepEqual(empty.data.events, []);
   const graph = await service.call('memory_database_graph', { labels: ['Event', 'Concept'] });
   assert.ok(graph.nodes.some(n => n.id === 'Concept:concept_legacy')); assert.equal(graph.relationships.length, 1);
   // Ambiguous entity identity must roll back the whole transaction, including newly created concepts.

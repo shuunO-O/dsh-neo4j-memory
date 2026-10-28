@@ -1,6 +1,7 @@
 import { loadHostDeps } from './hostdeps.js'
 import { MemoryBackend } from './bridge.js'
 import { registerGraphRoutes } from './graph-server.js'
+import { renderMemoryEvidence } from './lib/evidence.js'
 
 // Both @deepseek-ai packages are optional peers, which a desktop profile never installs.
 // Resolving them here keeps one failed import from taking the whole plugin entry down.
@@ -52,6 +53,10 @@ const output = {
   schema: { type: 'json' },
   render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
 }
+const searchOutput = {
+  schema: { type: 'json' },
+  render: (_args, value) => [{ type: 'text', text: value?.status === 'ok' && ['evidence', 'source'].includes(value.data?.kind) ? renderMemoryEvidence(value.data) : JSON.stringify(value) }],
+}
 
 export function apply(ctx, config) {
   const backend = new MemoryBackend(config)
@@ -84,16 +89,25 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'memory_database_search',
-    description: 'Recall events, people or concepts from long-term graph memory using semantic search, related entity names or a calendar date. A failed search is an error and does not mean there are no matching memories.',
+    description: 'Recall graph memory. Default search fuses summary and source vectors and returns up to 4 new events with compact source evidence and shared-concept continuation entries. Use read for source text, expand for more events through a returned concept, or nearby for chapter/record neighbors when available. Pass the returned cursor for expand/nearby; these return only newly added events. Shared concepts and source proximity do not establish causality. A failed call does not mean there are no memories.',
     parameters: {
+      operation: { type: 'string', enum: ['search', 'read', 'expand', 'nearby'], description: 'Defaults to search. read needs event_id; expand needs cursor and concept_id; nearby needs cursor and event_id.' },
+      reset_seen: { type: 'boolean', description: 'search only: start a new recall task, allowing earlier events to be returned again. Delivered-ID and excerpt history otherwise expire after 15 minutes of inactivity.' },
       query_text: { type: 'string', description: 'Natural-language semantic query; at least one search condition is required.' },
       target_label: { type: 'string', enum: ['Event', 'Person', 'Concept'], description: 'Node type to retrieve; defaults to Event.' },
       entity_filter: { type: 'string', description: 'Exact name or known alias of a connected entity.' },
-      time_hint: { type: 'string', description: 'Calendar date YYYY-MM-DD, in the configured memory timezone.' },
+      time_hint: { type: 'string', description: 'Stored/written date YYYY-MM-DD in the configured memory timezone; not necessarily the event occurrence date.' },
+      event_id: { type: 'string', description: 'Event ID as returned, without a type prefix. Used by read/nearby.' },
+      concept_id: { type: 'string', description: 'Concept ID from the current continuation entries. Used by expand.' },
+      cursor: { type: 'string', description: 'Continuation cursor returned by this session; valid for 15 minutes. Use the latest returned cursor to continue.' },
+      start: { type: 'number', description: 'read source start offset, default 0. Offsets count Unicode characters, excluding the end position.' },
+      limit: { type: 'number', description: 'read: 1..10000 characters, default 1600. expand: accepts 1..8, delivers at most 4 new events within the remaining chain budget, default 3.' },
+      before: { type: 'number', description: 'nearby: preceding source record-number distance, 0..10, default 2.' },
+      after: { type: 'number', description: 'nearby: following source record-number distance, 0..10, default 2.' },
     },
-    output,
+    output: searchOutput,
     async execute(args, exec) {
-      return backend.call('memory_database_search', args, exec.signal)
+      return backend.call('memory_database_search', { ...args, session_id: exec.agent?.session?.id || 'dsh' }, exec.signal)
     },
   }))
 }

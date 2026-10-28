@@ -89,6 +89,12 @@ try {
 
 const toolNames = tools.map((tool) => tool.name).sort()
 assert(JSON.stringify(toolNames) === JSON.stringify(['memory_database_save', 'memory_database_search']), `tools registered: ${toolNames.join(', ')}`)
+const searchTool = tools.find((tool) => tool.name === 'memory_database_search')
+assert(JSON.stringify(searchTool?.parameters?.properties?.operation?.enum) === JSON.stringify(['search', 'read', 'expand', 'nearby']), 'search exposes the evidence continuation operations')
+if (searchTool) {
+  const rendered = searchTool.output.render({}, { status: 'ok', data: { kind: 'evidence', scope: 'initial', seen: 1, events: [{ id: 'event_1', summary: '计划部署', quote: { range: [0, 4], text: '计划部署' } }], shared: [], next: { concepts: [], nearby: [] } } })
+  assert(rendered?.[0]?.type === 'text' && rendered[0].text.includes('event_1 | 计划部署') && !rendered[0].text.startsWith('{'), 'search renders compact evidence text for the agent')
+}
 for (const tool of tools) {
   assert(typeof tool.description === 'string' && tool.description.length > 20, `${tool.name}: description present`)
   assert(typeof tool.execute === 'function', `${tool.name}: execute is a function`)

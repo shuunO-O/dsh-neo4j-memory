@@ -1,7 +1,18 @@
+import { sourceChunks, rerankEvents, RETRIEVAL, type RankedEvent } from './retrieval.js';
 import neo4j, { type Driver, type Transaction } from 'neo4j-driver';
 import { ModelClient, labels, relations, type Extraction } from './api.js';
 import { alignConcepts, type Candidate, type Decision, type EntityRecord } from './alignment.js';
 import type { MemoryConfig } from './config.js';
+import { EVIDENCE_LIMITS, sourcePosition, type EvidenceEvent, type EvidenceLink, type SourceResult } from './evidence.js';
+
+export interface EvidenceFilter { entity?: string; date?: string }
+export interface EvidenceSearchOptions { query?: string; exclude?: string[] }
+const evidenceWhere = (alias: string) => `($entity IS NULL OR EXISTS { MATCH (${alias})-[]-(m) WHERE m.name=$entity OR $entity IN coalesce(m.aliases,[]) })
+  AND ($date_prefix IS NULL OR ${alias}.create_time STARTS WITH $date_prefix)`;
+const evidenceFields = (alias: string) => `${alias}.id AS id,coalesce(${alias}.summary,${alias}.name,${alias}.id) AS summary,
+  substring(coalesce(${alias}.content,''),0,$source_window) AS content,size(coalesce(${alias}.content,'')) AS contentLength,
+  coalesce(toString(${alias}.occurred_at),toString(${alias}.event_time)) AS occurrenceTime`;
+const evidenceParams = (filter: EvidenceFilter, vector?: number[]) => ({ entity: filter.entity ?? null, date_prefix: filter.date ? filter.date + 'T' : null, vector: vector ?? null, source_window: neo4j.int(EVIDENCE_LIMITS.sourceWindow) });
 
 export const indexes: Record<string, string> = { Event: 'event_embedding', Person: 'person_embedding', Concept: 'concept_embedding', Location: 'location_embedding' };
 export class EmbeddingMismatch extends Error {}
@@ -36,6 +47,7 @@ export class Neo4jStore {
     if (!this.indexPromise) this.indexPromise = (async () => {
       // The sequence node is matched by id, so it must be unique even if two clients write at once.
       await this.run('CREATE CONSTRAINT memory_sequence_id IF NOT EXISTS FOR (c:MemorySequence) REQUIRE c.id IS UNIQUE', {}, signal);
+      await this.run('CREATE CONSTRAINT memory_source_id IF NOT EXISTS FOR (s:EventSource) REQUIRE s.id IS UNIQUE', {}, signal);
       await this.assertEmbeddingReady(signal);
       await this.createVectorIndexes(this.config.dimensions, signal);
     })().catch(error => { this.indexPromise = undefined; throw error; });
@@ -65,7 +77,7 @@ export class Neo4jStore {
   /** Group existing vectors by stored model/dimension, including nodes written before metadata existed. */
   private async embeddingStats(signal?: AbortSignal): Promise<{ dimensions: number | null; model: string | null; count: number }[]> {
     const rows = await this.run(`MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels)
-      RETURN size(n.embedding) AS dimensions, n.embedding_model AS model, count(*) AS count`, { labels }, signal);
+      RETURN size(n.embedding) AS dimensions, n.embedding_model AS model, count(*) AS count`, { labels: [...labels, 'EventSource'] }, signal);
     return rows.map(row => ({
       dimensions: row.dimensions === null || row.dimensions === undefined ? null : Number(row.dimensions),
       model: typeof row.model === 'string' && row.model ? row.model : null,
@@ -86,7 +98,7 @@ export class Neo4jStore {
         `${configured.model} (${configured.dimensions} dimensions). Re-vectorize existing memories in the Neo4j Memory settings before saving or searching.`,
       );
       const stats = await this.embeddingStats(signal);
-      if (!stats.every(row => row.dimensions === meta.dimensions)) throw new EmbeddingMismatch(
+      if (!stats.every(row => row.dimensions === meta.dimensions && (!row.model || row.model === meta.model))) throw new EmbeddingMismatch(
         `Some stored vectors do not match the recorded ${meta.dimensions}-dimension embedding metadata; ` +
         're-vectorize existing memories in the Neo4j Memory settings before saving or searching.',
       );
@@ -117,7 +129,7 @@ export class Neo4jStore {
     const models = [...new Set(stats.map(row => row.model).filter((value): value is string => Boolean(value)))];
     const configured = { model: this.config.embeddingModel, dimensions: this.config.dimensions };
     const compatible = meta
-      ? meta.model === configured.model && meta.dimensions === configured.dimensions && stats.every(row => row.dimensions === meta.dimensions)
+      ? meta.model === configured.model && meta.dimensions === configured.dimensions && stats.every(row => row.dimensions === meta.dimensions && (!row.model || row.model === meta.model))
       : nodes === 0
         ? true
         : detected.length === 1 && detected[0] === configured.dimensions && stats.every(row => row.dimensions !== null) && models.every(model => model === configured.model);
@@ -129,17 +141,24 @@ export class Neo4jStore {
    * index and old vectors untouched; only the final copy and index rebuild touch live data.
    */
   async reembed(client: ModelClient): Promise<{ nodes: number; model: string; dimensions: number }> {
+    const pending = this.saveTail.then(() => this.reembedMemory(client));
+    this.saveTail = pending.catch(() => {});
+    return pending;
+  }
+  private async reembedMemory(client: ModelClient): Promise<{ nodes: number; model: string; dimensions: number }> {
     const signal = client.signal, cfg = this.config;
     const previous = await this.readEmbeddingMeta(signal);
     signal?.throwIfAborted();
     const rows = await this.run(`MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels)
-      RETURN n.id AS id, labels(n) AS labels, n.summary AS summary, n.name AS name`, { labels }, signal);
+      RETURN n.id AS id, labels(n) AS labels, n.summary AS summary, n.name AS name, n.content AS content`, { labels }, signal);
     const texts = rows.map(row => {
       const value = Array.isArray(row.labels) && row.labels.includes('Event') ? row.summary : row.name;
       return String(value || row.name || row.id || '').trim() || String(row.id);
     });
-    const vectors = texts.length ? await client.embed(texts) : [];
-    if (vectors.length !== rows.length) throw new Error('Embedding response did not cover every memory node');
+    const chunks = rows.flatMap(row => row.labels.includes('Event') ? sourceChunks(String(row.content ?? '')).map(c => ({ ...c, eventId: row.id })) : []);
+    const allVectors = texts.length || chunks.length ? await client.embed([...texts, ...chunks.map(c => c.text)]) : [];
+    const vectors = allVectors.slice(0, rows.length);
+    if (allVectors.length !== rows.length + chunks.length) throw new Error('Embedding response did not cover every memory node');
     signal?.throwIfAborted();
     for (let start = 0; start < rows.length; start += 200) {
       const batch = rows.slice(start, start + 200).map((row, offset) => ({ id: row.id, vector: vectors[start + offset] }));
@@ -152,7 +171,11 @@ export class Neo4jStore {
     try {
       // Copy the staged vectors and the new metadata in one transaction: readers never see
       // new vectors with old metadata, or the reverse.
-      await this.run(`CALL {
+      await this.run(`CALL { MATCH (s:EventSource) DETACH DELETE s }
+        CALL { UNWIND $sources AS row MATCH (e:Event {id:row.eventId})
+          CREATE (e)-[:HAS_SOURCE]->(s:EventSource) SET s=row, s.embedding_model=$model, s.embedding_dim=$dimensions
+        }
+        CALL {
           MATCH (n) WHERE n.embedding_next IS NOT NULL
           SET n.embedding=n.embedding_next, n.embedding_model=n.embedding_next_model, n.embedding_dim=n.embedding_next_dim
           REMOVE n.embedding_next, n.embedding_next_model, n.embedding_next_dim
@@ -161,6 +184,7 @@ export class Neo4jStore {
         MERGE (m:MemoryMeta {id:'embedding'})
         SET m.model=$model, m.dimensions=$dimensions, m.updated_at=$updated_at`, {
         model: cfg.embeddingModel, dimensions: neo4j.int(cfg.dimensions), updated_at: localTimestamp(this.config.timezone),
+        sources: chunks.map((c, i) => ({ ...c, id: `${c.eventId}:source:${c.start}`, embedding: allVectors[rows.length + i] })),
       }, signal);
       swapped = true;
     } catch (error) {
@@ -201,7 +225,8 @@ export class Neo4jStore {
     }
     const eventId = await this.nextId('Event');
     for (const record of records) record.id = await this.nextId(record.label);
-    const vectors = await client.embed([summary, ...records.map(r => r.name)]);
+    const chunks = sourceChunks(content);
+    const vectors = await client.embed([summary, ...records.map(r => r.name), ...chunks.map(c => c.text)]);
     records.forEach((r, i) => { r.embedding = vectors[i + 1]; });
     const concepts = records.filter(r => r.label === 'Concept');
     const decisions = this.config.conceptAlignment && concepts.length
@@ -215,6 +240,11 @@ export class Neo4jStore {
       signal?.throwIfAborted();
       tx = session.beginTransaction({ timeout: 120_000 });
       await this.writeMemory(tx, records, eventId, extraction, summary, content, sessionId, vectors[0], decisions, nameToLabel, signal);
+      await tx.run(`UNWIND $rows AS row MATCH (e:Event {id:$event_id})
+        CREATE (e)-[:HAS_SOURCE]->(s:EventSource) SET s=row, s.embedding_model=$model, s.embedding_dim=$dimensions`, {
+        event_id: eventId, model: this.config.embeddingModel, dimensions: neo4j.int(this.config.dimensions),
+        rows: chunks.map((c, i) => ({ ...c, id: `${eventId}:source:${c.start}`, embedding: vectors[1 + records.length + i] })),
+      });
       signal?.throwIfAborted();
       await tx.commit(); // Never automatically replay a write with an uncertain commit outcome.
       return { event_id: eventId, decisions };
@@ -281,6 +311,80 @@ export class Neo4jStore {
       RETURN n.id AS id, n.name AS name, coalesce(n.aliases,[])[..20] AS aliases, left(coalesce(n.first_context,''),500) AS first_context, events`, { ids }, signal);
     if (candidates.length !== ids.length || new Set(candidates.map(c => c.id)).size !== ids.length) throw new Error('candidate_changed_or_duplicate_id');
     return candidates;
+  }
+  private async rankEvidence(vector: number[], filter: EvidenceFilter, options: EvidenceSearchOptions, signal?: AbortSignal, conceptId?: string, anchors: string[] = [], limit: number = EVIDENCE_LIMITS.events): Promise<EvidenceEvent[]> {
+    const params = { ...evidenceParams(filter, vector), excluded: options.exclude ?? [], candidates: neo4j.int(RETRIEVAL.candidates), concept_id: conceptId ?? null, anchors };
+    const where = `e.id IS NOT NULL AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
+      AND ($concept_id IS NULL OR EXISTS { MATCH (e)-[:MENTIONS]->(c:Concept {id:$concept_id})<-[:MENTIONS]-(a:Event) WHERE a.id IN $anchors })`;
+    // Exact ranking preserves filtering and refills after delivered-ID exclusion. Only
+    // the top 40 distinct events from each route cross the driver boundary.
+    const fields = `${evidenceFields('e')},e.embedding AS vector,
+      [(e)-[:HAS_SOURCE]->(s:EventSource) | s.hash] AS sourceHashes`;
+    const summary = await this.run(`/* evidence:summary-candidates */ MATCH (e:Event) WHERE ${where}
+      WITH e,vector.similarity.cosine(e.embedding,$vector) AS score WHERE score IS NOT NULL
+      RETURN ${fields},score ORDER BY score DESC,e.id LIMIT $candidates`, params, signal);
+    const content = await this.run(`/* evidence:source-candidates */ MATCH (e:Event)-[:HAS_SOURCE]->(s:EventSource)
+      WHERE ${where} AND s.embedding_model=$model AND s.embedding_dim=$dimensions
+      WITH e,max(vector.similarity.cosine(s.embedding,$vector)) AS score WHERE score IS NOT NULL
+      RETURN ${fields},score ORDER BY score DESC,e.id LIMIT $candidates`, { ...params, model: this.config.embeddingModel, dimensions: neo4j.int(this.config.dimensions) }, signal);
+    for (const route of [summary, content]) if (new Set(route.map(e => e.id)).size !== route.length) throw new Error('Memory Event IDs are ambiguous; no result confirmed');
+    const byId = new Map(summary.map(e => [e.id, e]));
+    for (const e of content) if (byId.has(e.id) && byId.get(e.id)!.content !== e.content) throw new Error('Memory records changed during retrieval; search again');
+    return rerankEvents([summary as RankedEvent[], content as RankedEvent[]], options.query ?? '', limit);
+  }
+  async searchEvidence(vector: number[] | undefined, filter: EvidenceFilter, signal?: AbortSignal, options: EvidenceSearchOptions = {}): Promise<EvidenceEvent[]> {
+    if (vector) return this.rankEvidence(vector, filter, options, signal);
+    return this.run(`/* evidence:search */ MATCH (e:Event) WHERE e.id IS NOT NULL AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
+      RETURN ${evidenceFields('e')} ORDER BY e.create_time DESC,e.id LIMIT $top_k`, {
+      ...evidenceParams(filter), excluded: options.exclude ?? [], top_k: neo4j.int(EVIDENCE_LIMITS.events),
+    }, signal);
+  }
+  async evidenceLinks(ids: string[], vector: number[] | undefined, signal?: AbortSignal): Promise<{ links: EvidenceLink[]; limited: boolean }> {
+    if (!ids.length) return { links: [], limited: false };
+    const rows = await this.run(`/* evidence:links */ UNWIND $ids AS event_id MATCH (e:Event {id:event_id})
+      CALL { WITH e MATCH (e)-[:MENTIONS]->(c:Concept) WHERE c.id IS NOT NULL
+        WITH DISTINCT c
+        CALL { WITH c MATCH (related:Event)-[:MENTIONS]->(c) RETURN count(DISTINCT related) AS degree }
+        WITH c,degree WHERE degree>1
+        WITH c,degree,CASE WHEN $vector IS NULL OR c.embedding IS NULL THEN 0.0 ELSE vector.similarity.cosine(c.embedding,$vector) END AS score
+        ORDER BY score DESC,c.id LIMIT $concept_limit
+        RETURN collect({conceptId:c.id,name:coalesce(c.name,c.id),degree:degree,score:score}) AS links }
+      RETURN e.id AS eventId,links`, { ids, vector: vector ?? null, concept_limit: neo4j.int(EVIDENCE_LIMITS.conceptsPerEvent + 1) }, signal);
+    return { links: rows.flatMap(row => row.links.slice(0, EVIDENCE_LIMITS.conceptsPerEvent).map((c: Omit<EvidenceLink, 'eventId'>) => ({ ...c, eventId: row.eventId }))), limited: rows.some(row => row.links.length > EVIDENCE_LIMITS.conceptsPerEvent) };
+  }
+  async evidenceExisting(ids: string[], signal?: AbortSignal): Promise<void> {
+    const rows = await this.run('/* evidence:existing */ MATCH (e:Event) WHERE e.id IN $ids RETURN e.id AS id', { ids }, signal);
+    if (rows.length !== ids.length || new Set(rows.map(r => r.id)).size !== ids.length) throw new Error('Memory records changed or IDs are ambiguous; search again');
+  }
+  async expandEvidence(conceptId: string, seen: string[], vector: number[] | undefined, filter: EvidenceFilter, limit: number, signal?: AbortSignal, options: EvidenceSearchOptions = {}): Promise<EvidenceEvent[]> {
+    if (vector) return this.rankEvidence(vector, filter, { ...options, exclude: [...new Set([...seen, ...(options.exclude ?? [])])] }, signal, conceptId, seen, limit);
+    return this.run(`/* evidence:expand */ MATCH (e:Event)-[:MENTIONS]->(c:Concept {id:$concept_id})
+      WHERE e.id IS NOT NULL AND NOT e.id IN $seen AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
+        AND EXISTS { MATCH (anchor:Event)-[:MENTIONS]->(c) WHERE anchor.id IN $seen }
+      WITH DISTINCT e
+      WITH e,CASE WHEN $vector IS NULL OR e.embedding IS NULL THEN 0.0 ELSE vector.similarity.cosine(e.embedding,$vector) END AS score
+      RETURN ${evidenceFields('e')} ORDER BY score DESC,e.create_time DESC,e.id LIMIT $limit`, {
+      ...evidenceParams(filter, vector), concept_id: conceptId, seen, excluded: options.exclude ?? [], limit: neo4j.int(limit),
+    }, signal);
+  }
+  async nearbyEvidence(eventId: string, seen: string[], filter: EvidenceFilter, before: number, after: number, limit: number, signal?: AbortSignal, exclude: string[] = []): Promise<EvidenceEvent[]> {
+    const position = sourcePosition(eventId);
+    if (!position) throw new Error('This event has no reliable chapter/record position; use operation=read for its source');
+    return this.run(`/* evidence:nearby */ MATCH (e:Event)
+      WHERE e.id STARTS WITH $source_prefix AND NOT e.id IN $seen AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
+      WITH e,toInteger(substring(e.id,size($source_prefix))) AS record
+      WHERE record >= $first AND record <= $last
+      RETURN ${evidenceFields('e')} ORDER BY record,e.id LIMIT $limit`, {
+      ...evidenceParams(filter), source_prefix: position.prefix, first: neo4j.int(Math.max(0, position.record - before)), last: neo4j.int(position.record + after), seen, excluded: exclude, limit: neo4j.int(limit),
+    }, signal);
+  }
+  async readEvidence(eventId: string, start: number, limit: number, signal?: AbortSignal): Promise<SourceResult> {
+    const rows = await this.run(`/* evidence:read */ MATCH (e:Event {id:$id})
+      RETURN substring(coalesce(e.content,''),$start,$limit) AS text,size(coalesce(e.content,'')) AS total LIMIT 2`, { id: eventId, start: neo4j.int(start), limit: neo4j.int(limit) }, signal);
+    if (rows.length !== 1) throw new Error(rows.length ? 'Ambiguous Event ID' : 'Event not found');
+    const { text, total } = rows[0]; if (start > total) throw new Error('Source offset out of range');
+    const end = Math.min(total, start + limit);
+    return { kind: 'source', id: eventId, range: [start, end], text, total, ...(end < total ? { next: end } : {}) };
   }
   async search(query: string | undefined, label: string, entity: string | undefined, date: string | undefined, client: ModelClient): Promise<any> {
     let vector: number[] | undefined;

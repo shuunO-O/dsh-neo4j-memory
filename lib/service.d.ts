@@ -6,9 +6,15 @@ export declare class MemoryService {
     runtime?: LocalNeo4j | undefined;
     store: Neo4jStore;
     private reembedding;
+    private evidenceSessions;
+    private searchTails;
+    private evidenceCursors;
     constructor(config: MemoryConfig, runtime?: LocalNeo4j | undefined, store?: Neo4jStore);
     static create(keys: HostConfig, signal?: AbortSignal): Promise<MemoryService>;
     close(): Promise<void>;
+    private rememberEvidence;
+    private delivered;
+    private confirmDelivery;
     /**
      * Refresh model-facing settings from the live Config cells on an already-running service.
      * The backend is created once; volatile edits (keys, endpoints, models, threshold) must be
@@ -16,6 +22,7 @@ export declare class MemoryService {
      */
     applyLiveConfig(keys: HostConfig): void;
     call(method: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+    private dispatch;
 }
 /** One lazy, in-process service per Cordis plugin instance. */
 export declare class MemoryBackend {

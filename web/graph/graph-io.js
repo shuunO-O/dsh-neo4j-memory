@@ -1,6 +1,6 @@
 'use strict';
 (function(root){
-  const LIMITS=Object.freeze({bytes:20*1024*1024,nodes:3000,edges:20000});
+  const LIMITS=Object.freeze({bytes:20*1024*1024,nodes:5000,edges:30000});
   const TYPES=['Event','Person','Concept','Location'];
   function object(value){return value!==null&&typeof value==='object'&&!Array.isArray(value);}
   function key(id){if(typeof id==='string'&&id.length&&id.length<=1024)return `s:${id}`;if(Number.isSafeInteger(id))return `n:${id}`;throw new Error('节点和关系 ID 必须是非空字符串或安全整数。');}

@@ -12,3 +12,7 @@ tmp/
 backup/
 # Optional local memory database, for when the default %LOCALAPPDATA% path is not writable.
 .localdb/
+# Benchmark scripts, fixtures and their isolated Neo4j instances stay local.
+bench/
+# Local exploration workspace: experiment scripts and their exported artifacts.
+dsh-memory/
