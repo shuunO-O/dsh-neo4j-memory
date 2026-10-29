@@ -77,7 +77,7 @@ $cli = "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 | 向量 | DashScope / `qwen3.7-text-embedding`，1024 维 |
 | 概念对齐 | TypeSafe / `jev`，阈值 0.95 |
 
-概念对齐填的是**完整 endpoint**：TypeSafe 为 `https://api.typesafe.ai/v1/systemone`，OpenRouter 为 `https://openrouter.ai/api/alpha/decisions`。用 OpenRouter 时模型可填 `typesafe/jev-1.13` 或 `typesafe/jev-1.14`；换模型后建议重新校准阈值。
+概念对齐填的是**完整 endpoint**：TypeSafe 为 `https://api.typesafe.ai/v1/systemone`，OpenRouter 为 `https://openrouter.ai/api/alpha/decisions`。用 OpenRouter 时模型可填 `typesafe/jev-1.14`；换模型后建议重新校准阈值。
 
 保存后，Key、端点、模型、阈值、维度在下一次调用时生效；本地数据目录、Neo4j 模式、外部密码需要重启 DSH。
 
@@ -90,7 +90,7 @@ $cli = "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 | 概念对齐 | `TYPESAFE_API_KEY` | `DSH_NEO4J_MEMORY_ALIGNMENT_API_KEY` |
 | 外部 Neo4j | `NEO4J_PASSWORD` | `DSH_NEO4J_MEMORY_NEO4J_PASSWORD` |
 
-两列环境变量同时存在时，左列优先；空白值视为未设置。插件使用独立的凭据引用，不覆盖 DSH 主模型的 Key；这些凭据由同一 DSH home 下的各 profile 共享。设置页只显示是否配置及当前是否使用环境变量，不回显值；「清除」删除已保存凭据和旧配置值，不修改环境变量。DSH 凭据服务不可用时仍可通过环境变量或旧配置运行，但设置页不会退回明文配置来保存新 Key。
+两列环境变量同时存在时，左列优先；空白值视为未设置。插件使用独立的凭据引用，不覆盖 DSH 主模型的 Key；这些凭据由同一 DSH home 下的各 profile 共享。设置页只显示是否配置及当前是否使用环境变量，不回显值；「清除」删除已保存凭据和旧配置值，不修改环境变量。
 
 打开设置页或首次调用工具时，会尝试把旧配置 Key 迁移到 DSH：先写入、读回确认，再清除旧配置。写入或清理失败保留旧配置供重试；已有不同的 DSH 凭据时不覆盖，也不静默丢弃旧 Key，设置页会提示尚未完成迁移，可重新保存或清除对应项。环境变量的值不会被迁移或自动持久化。
 
@@ -104,6 +104,10 @@ $cli = "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 
 默认 `DSH_NEO4J_MEMORY_NEO4J_MODE=auto`：没有配置外部 URI/密码时使用本地实例，首次调用工具时下载并启动。数据、日志、`state.json` 位于 `%LOCALAPPDATA%\dsh-neo4j-memory\`，可在设置页改到其他可写目录（需重启）。
 
+本地数据目录还需要支持 Neo4j 的文件重命名和原子写入。部分 Windows 目录可能无法完成这些操作，即使文件都在同一目录下，也可能出现 `EXDEV` 或 `AtomicMoveNotSupportedException`。如果首次启动遇到这类错误，可以在 **设置 → Neo4j 记忆 → 数据库 → 本地数据目录**中指定其他可写目录（推荐），例如 `D:\dsh-neo4j-memory-data`，保存后重启 DSH。目录不一定要在 D 盘，也不需要移动 DSH 或插件；选择时请注意目录的访问权限和加密设置。
+
+更改目录不会自动迁移原有记忆数据库：新目录会作为新的本地数据库使用，原目录的数据仍留在原处。
+
 同一时间只建议运行一个使用托管模式的 DSH 实例。想让本地实例在 DSH 退出后继续运行，设置 `DSH_NEO4J_MEMORY_NEO4J_KEEP_RUNNING=1`。
 
 排障日志：
@@ -111,7 +115,9 @@ $cli = "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 - `%LOCALAPPDATA%\dsh-neo4j-memory\provision.log`
 - `%LOCALAPPDATA%\dsh-neo4j-memory\logs\console.log`
 
-Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分发这些二进制，首次运行时从官方地址下载。
+如果设置了其他本地数据目录，请在该目录下查找相同的日志文件。
+
+Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分发这些二进制，首次运行时从官方地址下载（下载失败可考虑设置代理）。
 
 ## 环境变量（可选）
 
@@ -165,7 +171,7 @@ Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分�
 
 ### 检索和继续追查
 
-首次调用方式不变，例如 `{"query_text":"Neo4j 的部署方式和方案演进"}`。默认 `target_label=Event`，每次最多返回 4 个事件，每个事件最多附 120 个字符的原文，全包摘录预算 1,000 字符；完整来源按需读取。模型看到紧凑结构化文字，内部界面数据、向量和配置不进入返回。
+首次调用方式不变，例如 `{"query_text":"Neo4j 的部署方式和方案演进"}`。默认 `target_label=Event`，每次最多返回 4 个事件，每个事件最多附 120 个字符的原文，全包摘录预算 1,000 字符；完整来源按需读取。模型看到紧凑结构化文字。
 
 | operation | 参数 | 用途 |
 |---|---|---|
@@ -174,7 +180,7 @@ Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分�
 | `expand` | `cursor` / `concept_id`，可选 `limit` | 经返回的 Concept 补取事件，默认 3 个；只返回新增内容 |
 | `nearby` | `cursor` / `event_id`，可选 `before` / `after` | 有章号和导出记录号时，补读同章相邻编号；只返回新增内容 |
 
-继续追查复用原问题向量和筛选条件，不增加提取或向量 API 调用。cursor 绑定当前会话，15 分钟内有效，重启后需重新检索；每条追查链累计最多 20 个事件。共享概念和来源邻近只代表检索线索，不等于因果或发生顺序。ID 直接使用 `event_1` / `concept_3`，不额外添加类型前缀或临时编号。
+cursor 绑定当前会话，15 分钟内有效，重启后需重新检索；每条追查链累计最多 20 个事件。
 
 `Person` / `Concept` 的定向实体检索继续使用原来的前三条和一跳上下文。详细返回格式、边界和升级兼容说明见 [检索接口](docs/retrieval.md)。
 
@@ -182,7 +188,6 @@ Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分�
 
 - 提取与合并较粗：仅单次抽取；概念按名称/别名 + 向量 + 两两判同，不保证一定准确。
 - 初始事件召回依赖摘要与原文分块向量；旧记忆没有原文分块时只能靠摘要命中。沿概念扩展不能补回数据库里缺失的关系，也不保证关键事实完整。
-- `time_hint` 过滤写入日期；仅有 `create_time` 时不会把它当成事件发生时间。普通 `event_123` ID 不提供可靠来源顺序，需有章号/记录号才能补读邻近来源。
 - 图谱只读：没有删除、合并、编辑节点/关系的 UI。
 - `0.7.0`，没有完整 benchmark；唯一的对照实验见 [public/dawn-retrieval-study](public/dawn-retrieval-study/README.md)，只覆盖《黎明之剑》前 500 章、18 道开发题与 6 道新题，不覆盖其他记忆场景；仅在 Windows x64 上测试过。
 
@@ -203,7 +208,7 @@ npm pack
 ## 隐私
 
 - 记忆库在本机，但提取/向量/对齐会把内容发给你配置的模型 API。
-- API Key 与外部 Neo4j 密码由 DSH 凭据服务管理；插件不把密钥返回设置页、写进对话或存入记忆库。旧插件配置会在确认迁移后清除；若旧值来自自定义 bundle 等继承层，迁移只在当前 profile 屏蔽该值，原始继承文件需自行清理。本地托管 Neo4j 自动生成的密码仍在数据目录的 `state.json`，本次改动不迁移它。
+- API Key 与外部 Neo4j 密码由 DSH 凭据服务管理；插件不把密钥返回设置页、写进对话或存入记忆库。旧插件配置会在确认迁移后清除；若旧值来自自定义 bundle 等继承层，迁移只在当前 profile 屏蔽该值，原始继承文件需自行清理。本地托管 Neo4j 自动生成的密码仍在数据目录的 `state.json`。
 - 不要把密码、密钥或不想发给模型服务的内容存进记忆库。
 
 ## 许可证
