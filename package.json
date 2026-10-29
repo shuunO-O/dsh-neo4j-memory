@@ -42,6 +42,7 @@
     "index.js",
     "client.js",
     "graph-server.js",
+    "credential-server.js",
     "hostdeps.js",
     "web",
     "bridge.js",

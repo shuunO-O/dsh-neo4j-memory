@@ -52,8 +52,13 @@ window.__ModuleLoader__.load({
       loading: '正在读取配置…',
       readOnly: '当前 profile 不接受写入。',
       localNote: '本地实例会在第一次调用记忆工具时下载并启动，dsh 退出时停止。数据目录由上面的「本地数据目录」决定；留空时为 %LOCALAPPDATA%\\dsh-neo4j-memory。',
-      keysNote: 'Key 保存在当前 dsh profile 的配置里，不会进入对话或模型上下文。',
-      secretHint: '已保存的 Key 不会回显；留空表示保持不变。',
+      keysNote: 'Key 由 DSH 凭据服务保存；非空环境变量优先于已保存的 Key。',
+      secretHint: '已保存的 Key 不会回显；留空表示保持不变。清除只删除保存值，不影响环境变量。',
+      credentialUnavailable: 'DSH 凭据服务暂不可用，无法保存 Key。',
+      migrationPending: '旧配置中的 Key 尚未全部迁移；请重新保存对应 Key，或稍后重试。',
+      credentialEnv: '当前使用环境变量',
+      credentialSaved: '已配置',
+      credentialEmpty: '未配置',
       graphTitle: '记忆图谱',
       graphIntro: '只读视图：读取插件自己的 Neo4j 里的事件、人物、概念与地点，在本地计算布局。',
       graphExpand: '展开图谱',
@@ -124,8 +129,13 @@ window.__ModuleLoader__.load({
       loading: 'Reading configuration…',
       readOnly: 'This profile does not accept writes.',
       localNote: 'The local instance is downloaded and started on the first memory tool call and stops when dsh exits. The folder above decides where its data lives; empty means %LOCALAPPDATA%\\dsh-neo4j-memory.',
-      keysNote: 'Keys are stored in the current dsh profile configuration and never enter the conversation or model context.',
-      secretHint: 'Saved keys are never echoed back; leave the field empty to keep them.',
+      keysNote: 'Keys are saved through DSH credentials. Non-empty environment variables override saved keys.',
+      secretHint: 'Saved keys are never echoed back; leave empty to keep them. Clearing removes saved values and leaves environment variables active.',
+      credentialUnavailable: 'DSH credentials are unavailable; keys cannot be saved.',
+      migrationPending: 'Some legacy keys have not migrated. Save the affected keys again or retry later.',
+      credentialEnv: 'Using environment variable',
+      credentialSaved: 'Configured',
+      credentialEmpty: 'Not configured',
       graphTitle: 'Memory graph',
       graphIntro: 'Read-only view of the events, people, concepts and places in this plugin\u2019s Neo4j; the layout is computed locally.',
       graphExpand: 'Expand graph',
@@ -460,6 +470,30 @@ window.__ModuleLoader__.load({
       const [embedding, setEmbedding] = React.useState(null)
       const [embeddingBusy, setEmbeddingBusy] = React.useState(false)
       const [embeddingError, setEmbeddingError] = React.useState('')
+      const [credentialStatus, setCredentialStatus] = React.useState(null)
+      const [credentialError, setCredentialError] = React.useState(false)
+
+      const credentialRequest = async (values) => {
+        const response = await fetch('/dsh-neo4j-memory/credentials', values === undefined ? {
+          cache: 'no-store', headers: { accept: 'application/json' },
+        } : {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-dsh-neo4j-memory-action': 'credentials' },
+          body: JSON.stringify(values),
+        })
+        const body = await response.json().catch(() => null)
+        if (!response.ok || !body?.ok) throw new Error('Credentials unavailable')
+        setCredentialStatus(body.data)
+        setCredentialError(false)
+        return body.data
+      }
+      React.useEffect(() => { void credentialRequest().catch(() => setCredentialError(true)) }, [])
+      const secretHint = (field) => {
+        const state = credentialStatus?.secrets?.[field]
+        const status = state?.source === 'env' ? t('credentialEnv') : state?.configured ? t('credentialSaved') : t('credentialEmpty')
+        return `${status} · ${t('secretHint')}`
+      }
+      const secretDisabled = busy || snapshot.writable === false || !credentialStatus?.writable
 
       React.useEffect(() => form.subscribe(() => setSnapshot(form.getSnapshot())), [form])
 
@@ -561,17 +595,20 @@ window.__ModuleLoader__.load({
         if (draft.alignmentThreshold !== storedThreshold) {
           ops.push({ op: 'set', path: ['alignmentThreshold'], value: draft.alignmentThreshold })
         }
+        const secrets = {}
         for (const field of SECRET_FIELDS) {
-          if (draft[field] !== '') ops.push({ op: 'set', path: [field], value: draft[field] })
+          if (draft[field].trim() !== '') secrets[field] = draft[field].trim()
         }
-        if (ops.length === 0) {
+        if (ops.length === 0 && Object.keys(secrets).length === 0) {
           setNotice({ kind: 'info', text: t('nochange') })
           return
         }
         setBusy(true)
         setNotice(null)
         try {
-          const ok = await form.mutate(ops)
+          // Key values go only to the write-only credential endpoint, never to Config.
+          if (Object.keys(secrets).length) await credentialRequest(secrets)
+          const ok = ops.length === 0 || await form.mutate(ops)
           if (ok) {
             setDraft((current) => ({ ...current, apiKey: '', embeddingApiKey: '', alignmentApiKey: '', neo4jPassword: '' }))
             setTouched(false)
@@ -588,12 +625,13 @@ window.__ModuleLoader__.load({
       }
 
       const clear = async (field) => {
-        if (!writable) return
+        if (secretDisabled) return
         setBusy(true)
         setNotice(null)
         try {
-          const ok = await form.unset(field)
-          setNotice({ kind: ok ? 'ok' : 'error', text: ok ? t('saved') : t('saveFailed') })
+          await credentialRequest({ [field]: null })
+          setDraft((current) => ({ ...current, [field]: '' }))
+          setNotice({ kind: 'ok', text: t('saved') })
         } catch {
           setNotice({ kind: 'error', text: t('saveFailed') })
         } finally {
@@ -693,7 +731,8 @@ window.__ModuleLoader__.load({
           type: 'password',
           value: draft.neo4jPassword,
           placeholder: t('secretPlaceholder'),
-          disabled,
+          disabled: secretDisabled,
+          hint: secretHint('neo4jPassword'),
           onChange: update('neo4jPassword'),
           onClear: () => clear('neo4jPassword'),
           clearLabel: t('clear'),
@@ -756,11 +795,11 @@ window.__ModuleLoader__.load({
               type: 'password',
               value: draft.apiKey,
               placeholder: t('secretPlaceholder'),
-              disabled,
+              disabled: secretDisabled,
               onChange: update('apiKey'),
               onClear: () => clear('apiKey'),
               clearLabel: t('clear'),
-              hint: t('secretHint'),
+              hint: secretHint('apiKey'),
             }),
             h(Field, {
               id: 'dsh-neo4j-memory-embedding-key',
@@ -768,10 +807,11 @@ window.__ModuleLoader__.load({
               type: 'password',
               value: draft.embeddingApiKey,
               placeholder: t('secretPlaceholder'),
-              disabled,
+              disabled: secretDisabled,
               onChange: update('embeddingApiKey'),
               onClear: () => clear('embeddingApiKey'),
               clearLabel: t('clear'),
+              hint: secretHint('embeddingApiKey'),
             }),
             h(Field, {
               id: 'dsh-neo4j-memory-alignment-key',
@@ -779,10 +819,11 @@ window.__ModuleLoader__.load({
               type: 'password',
               value: draft.alignmentApiKey,
               placeholder: t('secretPlaceholder'),
-              disabled,
+              disabled: secretDisabled,
               onChange: update('alignmentApiKey'),
               onClear: () => clear('alignmentApiKey'),
               clearLabel: t('clear'),
+              hint: secretHint('alignmentApiKey'),
             }),
             h('p', { style: hintStyle }, t('keysNote')),
           ) : null,
@@ -907,6 +948,12 @@ window.__ModuleLoader__.load({
           ) : null,
         ),
         !writable ? h('p', { style: hintStyle }, t('readOnly')) : null,
+        credentialError || credentialStatus?.writable === false ? h('p', { style: hintStyle }, t('credentialUnavailable'), ' ',
+          h('button', { type: 'button', style: linkButtonStyle, disabled: busy,
+            onClick: () => { void credentialRequest().catch(() => setCredentialError(true)) },
+          }, t('refresh')),
+        ) : null,
+        credentialStatus?.migrationPending ? h('p', { style: hintStyle }, t('migrationPending')) : null,
         h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
           h('button', {
             type: 'button',

@@ -24,10 +24,16 @@ async function server(t, handle) {
   return `http://127.0.0.1:${http.address().port}`;
 }
 
-test('configuration uses EMBEDDING_API_KEY, host overrides and lazy credentials', () => {
+test('configuration keeps secrets env-first and every other field Config-first', () => {
   const cfg = MemoryConfig.fromEnvironment({}, { EMBEDDING_API_KEY: ' new-key ', QWEN_EMBEDDING_API_KEY: 'old-key' });
   assert.equal(cfg.embeddingApiKey, 'new-key'); assert.equal(cfg.neo4jManaged, true);
-  assert.equal(MemoryConfig.fromEnvironment({ embeddingApiKey: 'UI' }, { EMBEDDING_API_KEY: 'env' }).embeddingApiKey, 'UI');
+  // A non-empty environment variable wins for secrets, so the key can stay off disk.
+  assert.equal(MemoryConfig.fromEnvironment({ embeddingApiKey: 'UI' }, { EMBEDDING_API_KEY: 'env' }).embeddingApiKey, 'env');
+  assert.equal(MemoryConfig.fromEnvironment({ embeddingApiKey: 'UI' }, { EMBEDDING_API_KEY: '   ' }).embeddingApiKey, 'UI');
+  assert.equal(MemoryConfig.fromEnvironment({ embeddingApiKey: 'UI' }, {}).embeddingApiKey, 'UI');
+  assert.equal(MemoryConfig.fromEnvironment({ neo4jMode: 'external', neo4jPassword: 'ui' }, { NEO4J_PASSWORD: 'env' }).neo4jPassword, 'env');
+  // Non-secret settings are still Config-first.
+  assert.equal(MemoryConfig.fromEnvironment({ embeddingModel: 'ui-model' }, { DSH_NEO4J_MEMORY_EMBEDDING_MODEL: 'env-model' }).embeddingModel, 'ui-model');
   assert.equal(MemoryConfig.fromEnvironment({}, { QWEN_EMBEDDING_API_KEY: 'old' }).embeddingApiKey, '');
   assert.throws(() => MemoryConfig.fromEnvironment({}, {}).requireModelKeys(), /EMBEDDING_API_KEY/);
   assert.throws(() => MemoryConfig.fromEnvironment({ neo4jMode: 'external' }, {}), /NEO4J_PASSWORD/);

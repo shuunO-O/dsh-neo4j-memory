@@ -1,4 +1,6 @@
 export type HostConfig = Record<string, unknown>;
+/** Resolve a live Config field to its current value, leaving plain values untouched. */
+export declare function liveValue(value: unknown): unknown;
 export declare function parseBoolean(value: unknown, fallback: boolean): boolean;
 export declare class MemoryConfig {
     apiKey: string;

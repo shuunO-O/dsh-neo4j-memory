@@ -27,12 +27,13 @@ export declare class MemoryService {
 /** One lazy, in-process service per Cordis plugin instance. */
 export declare class MemoryBackend {
     private keys;
+    private resolveKeys?;
     private starting?;
     private service?;
     private closed;
     private lifecycle;
     private pending;
-    constructor(keys?: HostConfig);
+    constructor(keys?: HostConfig, resolveKeys?: (() => Promise<HostConfig>) | undefined);
     start(): Promise<MemoryService>;
     call(method: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
     close(): Promise<void>;

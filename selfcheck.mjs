@@ -73,6 +73,7 @@ const fakeCtx = {
     },
   },
   inject: (deps, callback) => {
+    if (deps?.[0] === 'settings') return
     if (!Array.isArray(deps) || deps[0] !== 'webServer') bad(`unexpected inject deps: ${JSON.stringify(deps)}`)
     return callback(fakeCtx)
   },
@@ -115,6 +116,7 @@ const expectedPaths = [
   '/dsh-neo4j-memory/embedding-status', '/dsh-neo4j-memory/reembed',
 ]
 const registeredPaths = routes.map((route) => route.path)
+assert(registeredPaths.includes('/dsh-neo4j-memory/credentials'), 'write-only credential route registered')
 const missingRoutes = expectedPaths.filter((path) => !registeredPaths.includes(path))
 assert(missingRoutes.length === 0, `all ${expectedPaths.length} graph routes registered${missingRoutes.length ? ` (missing ${missingRoutes.join(', ')})` : ''}`)
 assert(routes.every((route) => route.kind === 'exact' && typeof route.handler === 'function'), 'every graph route is exact with a handler')

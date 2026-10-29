@@ -10,6 +10,6 @@ const plugin = await import(pathToFileURL(join(root, 'index.js')));
 assert.equal(plugin.name, 'dsh-neo4j-memory');
 const { MemoryConfig } = await import(pathToFileURL(join(root, 'lib/config.js')));
 assert.equal(MemoryConfig.fromEnvironment({}, { EMBEDDING_API_KEY: 'fixture' }).embeddingApiKey, 'fixture');
-for (const file of ['lib/service.js', 'lib/runtime.js', 'lib/evidence.js', 'docs/retrieval.md', 'assets/windows-guardian.ps1', 'assets/extraction_prompt.md']) await access(join(root, file));
+for (const file of ['credential-server.js', 'lib/credentials.js', 'lib/service.js', 'lib/runtime.js', 'lib/evidence.js', 'docs/retrieval.md', 'assets/windows-guardian.ps1', 'assets/extraction_prompt.md']) await access(join(root, file));
 await assert.rejects(access(join(root, 'python')));
 console.log('Packed plugin loads with production npm dependencies; no Python backend is included.');

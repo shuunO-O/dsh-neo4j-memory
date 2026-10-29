@@ -79,7 +79,20 @@ $cli = "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 
 概念对齐填的是**完整 endpoint**：TypeSafe 为 `https://api.typesafe.ai/v1/systemone`，OpenRouter 为 `https://openrouter.ai/api/alpha/decisions`。用 OpenRouter 时模型可填 `typesafe/jev-1.13` 或 `typesafe/jev-1.14`；换模型后建议重新校准阈值。
 
-保存后，Key、端点、模型、阈值、维度在下一次调用时生效；本地数据目录、Neo4j 模式、外部密码需要重启 DSH。Key 保存在当前 profile 配置中，不回显，也不进入对话。
+保存后，Key、端点、模型、阈值、维度在下一次调用时生效；本地数据目录、Neo4j 模式、外部密码需要重启 DSH。
+
+设置页通过 **DSH Credentials 服务**保存 API Key 和外部 Neo4j 密码，不再把新密钥写进 `cordis.patch.yml`。每次调用按以下顺序读取：**非空进程环境变量 → 插件独立的 DSH 凭据 → 旧插件配置（兼容）**。其余字段仍是插件配置优先。
+
+| 用途 | 优先使用的环境变量 | 插件的 DSH 凭据引用（也可用作环境变量） |
+|---|---|---|
+| 提取模型 | `DEEPSEEK_API_KEY` | `DSH_NEO4J_MEMORY_EXTRACTION_API_KEY` |
+| 向量模型 | `EMBEDDING_API_KEY` | `DSH_NEO4J_MEMORY_EMBEDDING_API_KEY` |
+| 概念对齐 | `TYPESAFE_API_KEY` | `DSH_NEO4J_MEMORY_ALIGNMENT_API_KEY` |
+| 外部 Neo4j | `NEO4J_PASSWORD` | `DSH_NEO4J_MEMORY_NEO4J_PASSWORD` |
+
+两列环境变量同时存在时，左列优先；空白值视为未设置。插件使用独立的凭据引用，不覆盖 DSH 主模型的 Key；这些凭据由同一 DSH home 下的各 profile 共享。设置页只显示是否配置及当前是否使用环境变量，不回显值；「清除」删除已保存凭据和旧配置值，不修改环境变量。DSH 凭据服务不可用时仍可通过环境变量或旧配置运行，但设置页不会退回明文配置来保存新 Key。
+
+打开设置页或首次调用工具时，会尝试把旧配置 Key 迁移到 DSH：先写入、读回确认，再清除旧配置。写入或清理失败保留旧配置供重试；已有不同的 DSH 凭据时不覆盖，也不静默丢弃旧 Key，设置页会提示尚未完成迁移，可重新保存或清除对应项。环境变量的值不会被迁移或自动持久化。
 
 ### 向量维度与重新向量化
 
@@ -102,11 +115,10 @@ Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分�
 
 ## 环境变量（可选）
 
-插件配置优先于环境变量。
+密钥类字段**非空进程环境变量优先于 DSH 凭据，再回退旧插件配置**，具体名称见上表。其余字段仍是插件配置优先。
 
 | 变量 | 默认值 |
 |---|---|
-| `DEEPSEEK_API_KEY` / `EMBEDDING_API_KEY` / `TYPESAFE_API_KEY` | 无；提取、向量、对齐 Key |
 | `DSH_NEO4J_MEMORY_NEO4J_MODE` | `auto`（`auto` / `managed` / `external`） |
 | `DSH_NEO4J_MEMORY_NEO4J_URI` | `bolt://localhost:7687`（external） |
 | `NEO4J_PASSWORD` | 无；external 必填 |
@@ -191,7 +203,7 @@ npm pack
 ## 隐私
 
 - 记忆库在本机，但提取/向量/对齐会把内容发给你配置的模型 API。
-- API Key 存在当前 DSH profile 的配置里，不进入对话或模型上下文。
+- API Key 与外部 Neo4j 密码由 DSH 凭据服务管理；插件不把密钥返回设置页、写进对话或存入记忆库。旧插件配置会在确认迁移后清除；若旧值来自自定义 bundle 等继承层，迁移只在当前 profile 屏蔽该值，原始继承文件需自行清理。本地托管 Neo4j 自动生成的密码仍在数据目录的 `state.json`，本次改动不迁移它。
 - 不要把密码、密钥或不想发给模型服务的内容存进记忆库。
 
 ## 许可证

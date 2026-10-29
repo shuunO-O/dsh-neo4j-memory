@@ -2,7 +2,7 @@ export type HostConfig = Record<string, unknown>;
 /** Cordis marks live-editable Config fields with this symbol and a `get()` reader. */
 const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write');
 /** Resolve a live Config field to its current value, leaving plain values untouched. */
-function liveValue(value: unknown): unknown {
+export function liveValue(value: unknown): unknown {
   if (value !== null && typeof value === 'object' && VOLATILE_WRITE in value) {
     const get = (value as { get?: unknown }).get;
     if (typeof get === 'function') return (get as () => unknown).call(value);
@@ -44,10 +44,18 @@ export class MemoryConfig {
       if (!Number.isFinite(parsed)) throw new Error(`Invalid ${key}`);
       return parsed;
     };
-    cfg.apiKey = text('apiKey', 'DEEPSEEK_API_KEY');
-    cfg.embeddingApiKey = text('embeddingApiKey', 'EMBEDDING_API_KEY');
-    cfg.alignmentApiKey = text('alignmentApiKey', 'TYPESAFE_API_KEY');
-    cfg.neo4jPassword = text('neo4jPassword', 'NEO4J_PASSWORD');
+    // The host resolves DSH credentials before passing keys here. Non-empty
+    // process environment secrets always win, including in standalone use.
+    const secret = (key: string, variable: string) => {
+      const fromEnv = typeof env[variable] === 'string' ? env[variable]!.trim() : '';
+      const value = fromEnv || liveValue(keys[key]) || '';
+      if (typeof value !== 'string') throw new Error(`Invalid ${key}`);
+      return value.trim();
+    };
+    cfg.apiKey = secret('apiKey', 'DEEPSEEK_API_KEY');
+    cfg.embeddingApiKey = secret('embeddingApiKey', 'EMBEDDING_API_KEY');
+    cfg.alignmentApiKey = secret('alignmentApiKey', 'TYPESAFE_API_KEY');
+    cfg.neo4jPassword = secret('neo4jPassword', 'NEO4J_PASSWORD');
     const mode = text('neo4jMode', 'DSH_NEO4J_MEMORY_NEO4J_MODE', 'auto').toLowerCase();
     if (!['auto', 'managed', 'external'].includes(mode)) throw new Error('DSH_NEO4J_MEMORY_NEO4J_MODE must be auto, managed or external');
     const uri = env.DSH_NEO4J_MEMORY_NEO4J_URI?.trim();

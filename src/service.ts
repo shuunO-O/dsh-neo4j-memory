@@ -213,11 +213,14 @@ export class MemoryBackend {
   private closed = false;
   private lifecycle = new AbortController();
   private pending = new Set<Promise<unknown>>();
-  constructor(private keys: HostConfig = {}) {}
+  constructor(private keys: HostConfig = {}, private resolveKeys?: () => Promise<HostConfig>) {}
   async start() {
     if (this.closed) throw new Error('Memory plugin has been disposed');
     if (!this.starting) {
-      this.starting = MemoryService.create(this.keys, AbortSignal.any([this.lifecycle.signal, AbortSignal.timeout(600_000)])).then(async service => {
+      this.starting = Promise.resolve().then(async () => MemoryService.create(
+        this.resolveKeys ? await this.resolveKeys() : this.keys,
+        AbortSignal.any([this.lifecycle.signal, AbortSignal.timeout(600_000)]),
+      )).then(async service => {
         if (this.closed) { await service.close(); throw new Error('Memory plugin has been disposed'); }
         this.service = service; return service;
       }).catch(error => { this.starting = undefined; throw error; });
@@ -235,7 +238,7 @@ export class MemoryBackend {
         if (waiting.aborted) { waiting.removeEventListener('abort', abort); abort(); return; }
         this.start().then(resolve, reject).finally(() => waiting.removeEventListener('abort', abort));
       });
-      service.applyLiveConfig(this.keys);
+      service.applyLiveConfig(this.resolveKeys ? await this.resolveKeys() : this.keys);
       const timeout = method === 'memory_database_reembed' ? 900_000 : 250_000;
       const combined = AbortSignal.any([waiting, AbortSignal.timeout(timeout)]);
       combined.throwIfAborted();
