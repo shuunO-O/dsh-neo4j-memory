@@ -3,7 +3,7 @@ export declare const RETRIEVAL: Readonly<{
     candidates: 40;
     rrfK: 60;
     keywordBonus: 0.1;
-    mmrLambda: 0.85;
+    mmrLambda: 0.75;
 }>;
 export interface SourceChunk {
     start: number;

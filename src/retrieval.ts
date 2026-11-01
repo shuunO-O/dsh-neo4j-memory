@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { EvidenceEvent } from './evidence.js';
 
-export const RETRIEVAL = Object.freeze({ candidates: 40, rrfK: 60, keywordBonus: .10, mmrLambda: .85 });
+export const RETRIEVAL = Object.freeze({ candidates: 40, rrfK: 60, keywordBonus: .10, mmrLambda: .75 });
 export interface SourceChunk { start: number; end: number; text: string; hash: string }
 export function sourceChunks(content: string): SourceChunk[] {
   const points = Array.from(content), chunks: SourceChunk[] = [];

@@ -22,6 +22,11 @@ export declare class MemoryConfig {
     alignmentThreshold: number;
     timezone: string;
     dataDir: string;
+    sourceRerankUrl: string;
+    sourceRerankModel: string;
+    sourceRerankApiKey: string;
+    /** 0 disables the per-session diversity cap on the primary evidence slots. */
+    sessionCap: number;
     static fromEnvironment(keys?: HostConfig, env?: NodeJS.ProcessEnv): MemoryConfig;
     requireModelKeys(extraction?: boolean, embedding?: boolean, alignment?: boolean): void;
 }

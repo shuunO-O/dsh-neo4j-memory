@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { MemoryConfig } from './config.js';
+import type { SourceMatch } from './source-search.js';
 
 export class ModelAPIError extends Error {}
 export interface Relationship { source: string; target: string; type: string; properties?: { sentiment?: string } }
@@ -32,6 +33,19 @@ export function validateExtraction(value: unknown): asserts value is Extraction 
 }
 export class ModelClient {
   constructor(public config: MemoryConfig, public signal?: AbortSignal) {}
+  async rerankSource(query: string, rows: SourceMatch[]): Promise<SourceMatch[]> {
+    const cfg = this.config;
+    if (!rows.length || !cfg.sourceRerankUrl) return rows;
+    if (!cfg.sourceRerankApiKey) throw new ModelAPIError('Missing source rerank API key');
+    const data = await this.post(cfg.sourceRerankUrl, '', cfg.sourceRerankApiKey,
+      {model:cfg.sourceRerankModel,query,documents:rows.map(r=>r.text),top_n:rows.length});
+    const results = data.results ?? data.output?.results, seen = new Set<number>();
+    if (!Array.isArray(results) || results.length !== rows.length) throw new ModelAPIError('Invalid source rerank response count');
+    return results.map((r: any) => {
+      if (!Number.isInteger(r.index) || r.index<0 || r.index>=rows.length || seen.has(r.index) || typeof r.relevance_score !== 'number' || !Number.isFinite(r.relevance_score)) throw new ModelAPIError('Invalid source rerank response score/index');
+      seen.add(r.index); return {...rows[r.index],score:r.relevance_score};
+    });
+  }
   async post(base: string, path: string, key: string, body: unknown, timeout = 60_000): Promise<any> {
     const signal = AbortSignal.any([AbortSignal.timeout(timeout), ...(this.signal ? [this.signal] : [])]);
     try {

@@ -3,16 +3,27 @@ import neo4j, { type Driver, type Transaction } from 'neo4j-driver';
 import { ModelClient, labels, relations, type Extraction } from './api.js';
 import { alignConcepts, type Candidate, type Decision, type EntityRecord } from './alignment.js';
 import type { MemoryConfig } from './config.js';
-import { EVIDENCE_LIMITS, sourcePosition, type EvidenceEvent, type EvidenceLink, type SourceResult } from './evidence.js';
+import { dateRange, EVIDENCE_LIMITS, sourcePosition, type EvidenceEvent, type EvidenceLink, type SourceResult } from './evidence.js';
+import { uniqueSourceMatches, type SourceMatch } from './source-search.js';
 
-export interface EvidenceFilter { entity?: string; date?: string }
-export interface EvidenceSearchOptions { query?: string; exclude?: string[] }
+export interface EvidenceFilter { entity?: string; date?: string; chapter?: number }
+export interface EvidenceSearchOptions { query?: string; exclude?: string[]; limit?: number }
 const evidenceWhere = (alias: string) => `($entity IS NULL OR EXISTS { MATCH (${alias})-[]-(m) WHERE m.name=$entity OR $entity IN coalesce(m.aliases,[]) })
-  AND ($date_prefix IS NULL OR ${alias}.create_time STARTS WITH $date_prefix)`;
+  AND ($date_start IS NULL OR ${alias}.create_time >= $date_start)
+  AND ($date_end IS NULL OR ${alias}.create_time < $date_end)
+  AND ($chapter IS NULL OR ${alias}.chapter = $chapter)`;
 const evidenceFields = (alias: string) => `${alias}.id AS id,coalesce(${alias}.summary,${alias}.name,${alias}.id) AS summary,
+  ${alias}.chapter AS chapter,${alias}.chapter_title AS chapterTitle,${alias}.raw_session AS session,
   substring(coalesce(${alias}.content,''),0,$source_window) AS content,size(coalesce(${alias}.content,'')) AS contentLength,
   coalesce(toString(${alias}.occurred_at),toString(${alias}.event_time)) AS occurrenceTime`;
-const evidenceParams = (filter: EvidenceFilter, vector?: number[]) => ({ entity: filter.entity ?? null, date_prefix: filter.date ? filter.date + 'T' : null, vector: vector ?? null, source_window: neo4j.int(EVIDENCE_LIMITS.sourceWindow) });
+const evidenceParams = (filter: EvidenceFilter, vector?: number[]) => {
+  const range = filter.date ? dateRange(filter.date) : undefined;
+  return {
+    entity: filter.entity ?? null, chapter: filter.chapter == null ? null : neo4j.int(filter.chapter),
+    date_start: range?.start ?? null, date_end: range?.end ?? null,
+    vector: vector ?? null, source_window: neo4j.int(EVIDENCE_LIMITS.sourceWindow),
+  };
+};
 
 export const indexes: Record<string, string> = { Event: 'event_embedding', Person: 'person_embedding', Concept: 'concept_embedding', Location: 'location_embedding' };
 export class EmbeddingMismatch extends Error {}
@@ -48,8 +59,18 @@ export class Neo4jStore {
       // The sequence node is matched by id, so it must be unique even if two clients write at once.
       await this.run('CREATE CONSTRAINT memory_sequence_id IF NOT EXISTS FOR (c:MemorySequence) REQUIRE c.id IS UNIQUE', {}, signal);
       await this.run('CREATE CONSTRAINT memory_source_id IF NOT EXISTS FOR (s:EventSource) REQUIRE s.id IS UNIQUE', {}, signal);
+      await this.run('CREATE INDEX event_chapter IF NOT EXISTS FOR (e:Event) ON (e.chapter)', {}, signal);
       await this.assertEmbeddingReady(signal);
       await this.createVectorIndexes(this.config.dimensions, signal);
+      // Experimental lexical route (off by default). It only pays off when the query already
+      // contains the answer's exact words; on generic questions it displaced better vector hits.
+      if (process.env.DSH_NEO4J_MEMORY_FULLTEXT === '1') {
+        try {
+          await this.run(`CREATE FULLTEXT INDEX event_fulltext IF NOT EXISTS FOR (e:Event) ON EACH [e.summary]
+            OPTIONS { indexConfig: { \`fulltext.analyzer\`: 'cjk' } }`, {}, signal);
+          await this.run('CALL db.awaitIndex($name, 30)', { name: 'event_fulltext' }, signal);
+        } catch { /* fulltext is optional */ }
+      }
     })().catch(error => { this.indexPromise = undefined; throw error; });
     await this.indexPromise; signal?.throwIfAborted();
   }
@@ -312,7 +333,7 @@ export class Neo4jStore {
     if (candidates.length !== ids.length || new Set(candidates.map(c => c.id)).size !== ids.length) throw new Error('candidate_changed_or_duplicate_id');
     return candidates;
   }
-  private async rankEvidence(vector: number[], filter: EvidenceFilter, options: EvidenceSearchOptions, signal?: AbortSignal, conceptId?: string, anchors: string[] = [], limit: number = EVIDENCE_LIMITS.events): Promise<EvidenceEvent[]> {
+  private async rankEvidence(vector: number[], filter: EvidenceFilter, options: EvidenceSearchOptions, signal?: AbortSignal, conceptId?: string, anchors: string[] = [], limit: number = options.limit ?? EVIDENCE_LIMITS.events): Promise<EvidenceEvent[]> {
     const params = { ...evidenceParams(filter, vector), excluded: options.exclude ?? [], candidates: neo4j.int(RETRIEVAL.candidates), concept_id: conceptId ?? null, anchors };
     const where = `e.id IS NOT NULL AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
       AND ($concept_id IS NULL OR EXISTS { MATCH (e)-[:MENTIONS]->(c:Concept {id:$concept_id})<-[:MENTIONS]-(a:Event) WHERE a.id IN $anchors })`;
@@ -325,18 +346,35 @@ export class Neo4jStore {
       RETURN ${fields},score ORDER BY score DESC,e.id LIMIT $candidates`, params, signal);
     const content = await this.run(`/* evidence:source-candidates */ MATCH (e:Event)-[:HAS_SOURCE]->(s:EventSource)
       WHERE ${where} AND s.embedding_model=$model AND s.embedding_dim=$dimensions
-      WITH e,max(vector.similarity.cosine(s.embedding,$vector)) AS score WHERE score IS NOT NULL
-      RETURN ${fields},score ORDER BY score DESC,e.id LIMIT $candidates`, { ...params, model: this.config.embeddingModel, dimensions: neo4j.int(this.config.dimensions) }, signal);
+      WITH e,s,vector.similarity.cosine(s.embedding,$vector) AS score WHERE score IS NOT NULL
+      ORDER BY score DESC,s.start,s.id
+      WITH e,head(collect({score:score,start:s.start,end:s.end,text:s.text})) AS bestSource
+      RETURN ${fields},bestSource.score AS score,
+        {range:[bestSource.start,bestSource.end],text:bestSource.text} AS matchedSource
+      ORDER BY score DESC,e.id LIMIT $candidates`, { ...params, model: this.config.embeddingModel, dimensions: neo4j.int(this.config.dimensions) }, signal);
     for (const route of [summary, content]) if (new Set(route.map(e => e.id)).size !== route.length) throw new Error('Memory Event IDs are ambiguous; no result confirmed');
     const byId = new Map(summary.map(e => [e.id, e]));
     for (const e of content) if (byId.has(e.id) && byId.get(e.id)!.content !== e.content) throw new Error('Memory records changed during retrieval; search again');
-    return rerankEvents([summary as RankedEvent[], content as RankedEvent[]], options.query ?? '', limit);
+    for (const e of content) if (byId.has(e.id)) byId.get(e.id)!.matchedSource = e.matchedSource;
+    const keyword = process.env.DSH_NEO4J_MEMORY_FULLTEXT === '1' && options.query ? await this.keywordCandidates(options.query, where, params, signal) : [];
+    return rerankEvents([summary as RankedEvent[], content as RankedEvent[], keyword as RankedEvent[]], options.query ?? '', limit);
+  }
+  /** Full-text route over event summaries; Lucene BM25 order, fused later through RRF. */
+  private async keywordCandidates(query: string, where: string, params: Record<string, any>, signal?: AbortSignal): Promise<EvidenceEvent[]> {
+    const keyword_query = query.replace(/[+\-&|!(){}\[\]^"~*?:\\/]/gu, ' ').replace(/\s+/gu, ' ').trim();
+    if (!keyword_query) return [];
+    try {
+      return await this.run(`/* evidence:keyword-candidates */ CALL db.index.fulltext.queryNodes('event_fulltext', $keyword_query, {limit: $candidates})
+        YIELD node AS e, score
+        WHERE e.id IS NOT NULL AND NOT e.id IN $excluded AND ${where}
+        RETURN ${evidenceFields('e')} ORDER BY score DESC,e.id LIMIT $candidates`, { ...params, keyword_query }, signal);
+    } catch { return []; }
   }
   async searchEvidence(vector: number[] | undefined, filter: EvidenceFilter, signal?: AbortSignal, options: EvidenceSearchOptions = {}): Promise<EvidenceEvent[]> {
     if (vector) return this.rankEvidence(vector, filter, options, signal);
     return this.run(`/* evidence:search */ MATCH (e:Event) WHERE e.id IS NOT NULL AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
       RETURN ${evidenceFields('e')} ORDER BY e.create_time DESC,e.id LIMIT $top_k`, {
-      ...evidenceParams(filter), excluded: options.exclude ?? [], top_k: neo4j.int(EVIDENCE_LIMITS.events),
+      ...evidenceParams(filter), excluded: options.exclude ?? [], top_k: neo4j.int(options.limit ?? EVIDENCE_LIMITS.events),
     }, signal);
   }
   async evidenceLinks(ids: string[], vector: number[] | undefined, signal?: AbortSignal): Promise<{ links: EvidenceLink[]; limited: boolean }> {
@@ -369,14 +407,39 @@ export class Neo4jStore {
   }
   async nearbyEvidence(eventId: string, seen: string[], filter: EvidenceFilter, before: number, after: number, limit: number, signal?: AbortSignal, exclude: string[] = []): Promise<EvidenceEvent[]> {
     const position = sourcePosition(eventId);
-    if (!position) throw new Error('This event has no reliable chapter/record position; use operation=read for its source');
-    return this.run(`/* evidence:nearby */ MATCH (e:Event)
+    if (position) return this.run(`/* evidence:nearby */ MATCH (e:Event)
       WHERE e.id STARTS WITH $source_prefix AND NOT e.id IN $seen AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
       WITH e,toInteger(substring(e.id,size($source_prefix))) AS record
       WHERE record >= $first AND record <= $last
       RETURN ${evidenceFields('e')} ORDER BY record,e.id LIMIT $limit`, {
       ...evidenceParams(filter), source_prefix: position.prefix, first: neo4j.int(Math.max(0, position.record - before)), last: neo4j.int(position.record + after), seen, excluded: exclude, limit: neo4j.int(limit),
     }, signal);
+    // Records without a chapter/record id fall back to session order: several events
+    // may share one raw_session, ordered by create_time.
+    const anchor = await this.run(`/* evidence:anchor */ MATCH (e:Event {id:$id})
+      RETURN e.raw_session AS session,toString(e.create_time) AS time LIMIT 2`, { id: eventId }, signal);
+    const session = anchor.length === 1 ? String(anchor[0].session ?? '').trim() : '';
+    if (!session || !anchor[0].time) throw new Error('This event has no reliable chapter/record or session position; use operation=read for its source');
+    const params = { ...evidenceParams(filter), session, time: anchor[0].time, seen, excluded: exclude };
+    const previous = await this.run(`/* evidence:nearby */ MATCH (e:Event)
+      WHERE e.raw_session = $session AND e.create_time < $time AND NOT e.id IN $seen AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
+      RETURN ${evidenceFields('e')} ORDER BY e.create_time DESC,e.id DESC LIMIT $count`, { ...params, count: neo4j.int(before) }, signal);
+    const following = await this.run(`/* evidence:nearby */ MATCH (e:Event)
+      WHERE e.raw_session = $session AND e.create_time > $time AND NOT e.id IN $seen AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
+      RETURN ${evidenceFields('e')} ORDER BY e.create_time ASC,e.id ASC LIMIT $count`, { ...params, count: neo4j.int(after) }, signal);
+    return [...previous.reverse(), ...following].slice(0, limit);
+  }
+  async searchEventSource(eventId: string, vector: number[], signal?: AbortSignal): Promise<{total:number; rows:SourceMatch[]}> {
+    await this.assertEmbeddingReady(signal);
+    const events = await this.run('MATCH (e:Event {id:$id}) RETURN size(coalesce(e.content,\'\')) AS total',{id:eventId},signal);
+    if (events.length !== 1) throw new Error('Event not found or ambiguous');
+    const rows = await this.run(`MATCH (e:Event {id:$id})-[:HAS_SOURCE]->(s:EventSource)
+      WHERE s.embedding_model=$model AND s.embedding_dim=$dimensions
+      WITH s,vector.similarity.cosine(s.embedding,$vector) AS score WHERE score IS NOT NULL
+      RETURN s.id AS id,[s.start,s.end] AS range,s.text AS text,score AS vectorScore,score
+      ORDER BY score DESC,s.start,s.id`,{id:eventId,vector,model:this.config.embeddingModel,dimensions:neo4j.int(this.config.dimensions)},signal);
+    if (!rows.length && events[0].total) throw new Error('Event has no compatible source vectors; reembed before semantic read');
+    return {total:events[0].total,rows:uniqueSourceMatches(rows).slice(0,12)};
   }
   async readEvidence(eventId: string, start: number, limit: number, signal?: AbortSignal): Promise<SourceResult> {
     const rows = await this.run(`/* evidence:read */ MATCH (e:Event {id:$id})
@@ -396,7 +459,10 @@ export class Neo4jStore {
       const parts = [`MATCH (n:${label})`], params: Record<string, any> = { top_k: neo4j.int(3) };
       if (entity) { parts.push('MATCH (n)-[]-(m) WHERE m.name=$entity OR $entity IN coalesce(m.aliases,[])'); params.entity = entity; }
       parts.push('WITH DISTINCT n');
-      if (date && label === 'Event') { parts.push('WHERE n.create_time >= $start AND n.create_time <= $end'); params.start = `${date}T00:00:00`; params.end = `${date}T23:59:59`; }
+      if (date && label === 'Event') {
+        const range = dateRange(date);
+        if (range) { parts.push('WHERE n.create_time >= $start AND n.create_time < $end'); params.start = range.start; params.end = range.end; }
+      }
       if (vector) { parts.push('WITH n,vector.similarity.cosine(n.embedding,$vector) AS score WHERE score IS NOT NULL'); params.vector = vector; }
       parts.push(`RETURN n.id AS id,n.name AS name,n.summary AS summary,n.content AS content,n.create_time AS timestamp,n.type AS type,${vector ? 'score' : '0.0 AS score'} ORDER BY ${vector ? 'score DESC' : label === 'Event' ? 'n.create_time DESC' : 'n.name'} LIMIT $top_k`);
       rows = await this.run(parts.join('\n'), params, client.signal);

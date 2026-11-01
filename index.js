@@ -58,7 +58,7 @@ const output = {
 }
 const searchOutput = {
   schema: { type: 'json' },
-  render: (_args, value) => [{ type: 'text', text: value?.status === 'ok' && ['evidence', 'source'].includes(value.data?.kind) ? renderMemoryEvidence(value.data) : JSON.stringify(value) }],
+  render: (_args, value) => [{ type: 'text', text: value?.status === 'ok' && ['evidence', 'source', 'source_matches'].includes(value.data?.kind) ? renderMemoryEvidence(value.data) : JSON.stringify(value) }],
 }
 
 export function apply(ctx, config) {
@@ -109,21 +109,24 @@ export function apply(ctx, config) {
 
   ctx.tools.register(defineTool({
     name: 'memory_database_search',
-    description: 'Recall graph memory. Default search fuses summary and source vectors and returns up to 4 new events with compact source evidence and shared-concept continuation entries. Use read for source text, expand for more events through a returned concept, or nearby for chapter/record neighbors when available. Pass the returned cursor for expand/nearby; these return only newly added events. Shared concepts and source proximity do not establish causality. A failed call does not mean there are no memories.',
+    description: 'Recall graph memory. Default search fuses summary and source vectors and returns up to 8 new events with compact source evidence, plus a one-line index of up to 24 further candidate events (open any with read). Use read for source text: omit query_text and pass start/limit for a positional read, or pass query_text to locate passages inside that event (top_k 1..4, no start/limit). Use expand for more events through a returned concept, or nearby for chapter-record or same-session neighbors when available. Events may carry a chapter number; pass chapter to scope Event search to one chapter. Events may carry a time; pass time_hint to scope Event search to a date, month or range. Both are hard scopes. Pass the returned cursor for expand/nearby; these return only newly added events. Shared concepts and source proximity do not establish causality. A failed call does not mean there are no memories.',
     parameters: {
       operation: { type: 'string', enum: ['search', 'read', 'expand', 'nearby'], description: 'Defaults to search. read needs event_id; expand needs cursor and concept_id; nearby needs cursor and event_id.' },
       reset_seen: { type: 'boolean', description: 'search only: start a new recall task, allowing earlier events to be returned again. Delivered-ID and excerpt history otherwise expire after 15 minutes of inactivity.' },
-      query_text: { type: 'string', description: 'Natural-language semantic query; at least one search condition is required.' },
+      query_text: { type: 'string', description: 'search: semantic query. read + event_id: search source chunks within that event; repeat with another query to locate other details. Omit start/limit for semantic read.' },
+      top_k: { type: 'number', description: 'Semantic read only: maximum source chunks, integer 1..4, default 4. Overlapping selected chunks are merged.' },
+      min_score: { type: 'number', description: 'Semantic read only: optional relevance threshold -1..1, no default cutoff. Scores are not confidence probabilities; calibrate for the configured ranking model.' },
       target_label: { type: 'string', enum: ['Event', 'Person', 'Concept'], description: 'Node type to retrieve; defaults to Event.' },
       entity_filter: { type: 'string', description: 'Exact name or known alias of a connected entity.' },
-      time_hint: { type: 'string', description: 'Stored/written date YYYY-MM-DD in the configured memory timezone; not necessarily the event occurrence date.' },
+      time_hint: { type: 'string', description: 'search: stored date scope for Event, hard filter on the date shown on each row. Accepts YYYY, YYYY-MM, YYYY-MM-DD or an inclusive A..B range; any trailing time is ignored. Not necessarily the event occurrence date.' },
+      chapter: { type: 'number', description: 'search: exact chapter number (第81章 -> 81) when the memory stores chapter metadata; Event only. Acts as a hard scope and combines with query_text.' },
       event_id: { type: 'string', description: 'Event ID as returned, without a type prefix. Used by read/nearby.' },
       concept_id: { type: 'string', description: 'Concept ID from the current continuation entries. Used by expand.' },
       cursor: { type: 'string', description: 'Continuation cursor returned by this session; valid for 15 minutes. Use the latest returned cursor to continue.' },
       start: { type: 'number', description: 'read source start offset, default 0. Offsets count Unicode characters, excluding the end position.' },
-      limit: { type: 'number', description: 'read: 1..10000 characters, default 1600. expand: accepts 1..8, delivers at most 4 new events within the remaining chain budget, default 3.' },
-      before: { type: 'number', description: 'nearby: preceding source record-number distance, 0..10, default 2.' },
-      after: { type: 'number', description: 'nearby: following source record-number distance, 0..10, default 2.' },
+      limit: { type: 'number', description: 'read: 1..10000 characters, default 1600. expand: accepts 1..8, delivers at most 8 new events within the remaining chain budget, default 3.' },
+      before: { type: 'number', description: 'nearby: how many preceding neighbors to include, 0..10, default 2.' },
+      after: { type: 'number', description: 'nearby: how many following neighbors to include, 0..10, default 2.' },
     },
     output: searchOutput,
     async execute(args, exec) {

@@ -1,11 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { buildEvidence, evidenceExcerpt, renderMemoryEvidence, sourcePosition } from '../lib/evidence.js';
+import { buildEvidence, dateRange, evidenceExcerpt, renderMemoryEvidence, sessionDiverse, sourcePosition, resolveEventReference, AGENT_EVENT_FIELDS } from '../lib/evidence.js';
+import { Neo4jStore } from '../lib/store.js';
 import { MemoryConfig } from '../lib/config.js';
 import { MemoryService } from '../lib/service.js';
 
 const event = id => ({ id, summary: '甲只是计划部署 Neo4j，尚未完成。', content: '😀'.repeat(150) + '甲只是计划部署 Neo4j，尚未完成。', contentLength: 170 });
+test('source match retains Unicode offsets and points reads at the matching part of a long event', () => {
+  const prefix='😀'.repeat(1400), text='USER: I have been living in Harajuku for 3 months.\nASSISTANT: Thanks for the update.';
+  const content=prefix+text+' irrelevant'.repeat(400), start=Array.from(prefix).length;
+  const rows=Array.from({length:4},(_,i)=>({id:`event_${i+1}`,summary:'A long conversation about sightseeing.',content,contentLength:Array.from(content).length,matchedSource:{range:[start,start+Array.from(text).length],text}}));
+  const data=buildEvidence(rows,[],rows.map(e=>e.id),'How long living in Harajuku?','initial');
+  for(const row of data.events){assert(row.quote.text.includes('3 months'));assert.equal(Array.from(content).slice(...row.quote.range).join(''),row.quote.text);assert(row.read.start<=start);assert(row.read.start+row.read.limit>start+text.length);}
+  assert(data.events.reduce((n,e)=>n+Array.from(e.quote.text).length,0)<=1000);
+  assert(renderMemoryEvidence(data).includes('read event_id=event_1 limit='));
+});
+
+test('numeric IDs are scoped to delivered events and read responses expose total and continuation', async () => {
+  assert.equal(resolveEventReference('7',['event_7']),'event_7');assert.equal(resolveEventReference('Event:7',['event_7']),'event_7');
+  assert.equal(resolveEventReference('event_7',[]),'event_7');assert.throws(()=>resolveEventReference('7',['event_8']),/complete event_id/);
+  const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:'test'},{});let reads=0;
+  const service=new MemoryService(cfg,undefined,{close:async()=>{},searchEvidence:async()=>[event('event_7')],evidenceLinks:async()=>({links:[],limited:false}),readEvidence:async(id,start,limit)=>{reads++;assert.equal(id,'event_7');return{kind:'source',id,range:[start,start+limit],text:'exact source',total:500,next:start+limit};}});
+  try{
+    await service.call('memory_database_search',{entity_filter:'test',session_id:'owner'});
+    const read=await service.call('memory_database_search',{operation:'read',event_id:'7',session_id:'owner',limit:20});
+    assert.equal(reads,1);assert(renderMemoryEvidence(read.data).includes('原文共500字符'));assert(renderMemoryEvidence(read.data).includes('start=20 limit=1600'));
+    await assert.rejects(service.call('memory_database_search',{operation:'read',event_id:'7',session_id:'other'}),/complete event_id/);assert.equal(reads,1);
+  }finally{await service.close();}
+});
 test('evidence compression preserves exact Unicode ranges, qualifiers and real shared concepts', () => {
   const e = event('event_1'), quote = evidenceExcerpt(e.content, 'Neo4j 部署', e.summary, 120);
   assert.equal(Array.from(e.content).slice(...quote.range).join(''), quote.text);assert(Array.from(quote.text).length <= 120);assert(quote.text.includes('尚未完成'));
@@ -18,6 +41,34 @@ test('evidence compression preserves exact Unicode ranges, qualifiers and real s
   assert.equal(sourcePosition('event_123'),undefined);assert.deepEqual(sourcePosition('event_ch33_e06'),{prefix:'event_ch33_e',record:6});
 });
 
+test('agent-facing rows are whitelisted and provenance stays compact', () => {
+  const base = { ...event('event_ch0053_e09'), chapter: 53, chapterTitle: '魔网', embedding: [0.1, 0.2], embedding_model: 'model-x', embedding_dim: 768, raw_session: 'dawn-ch0053', source_scenes: ['ch0053_s013'], sourceHashes: ['abc'] };
+  const related = { ...base, id: 'event_ch0053_e03', summary: '高文提出拆分法阵' };
+  const data = buildEvidence([base], [], [base.id], '', 'initial', [], [related]);
+  const text = renderMemoryEvidence(data);
+  assert(text.includes('event_ch0053_e09 [第53章 魔网] |'));
+  assert(text.includes('event_ch0053_e03 [第53章] |'));
+  assert(text.includes('read event_id=event_ch0053_e09 limit='));
+  assert(!text.includes('事件内定位'));
+  assert(!text.includes('核对原文'));
+  for (const banned of ['embedding', 'raw_session', 'source_scenes', 'sourceHashes', 'model-x']) {
+    assert(!JSON.stringify(data).includes(banned), banned);
+    assert(!text.includes(banned), banned);
+  }
+  for (const row of data.events) for (const key of Object.keys(row)) assert(AGENT_EVENT_FIELDS.includes(key), key);
+  for (const row of data.related) for (const key of Object.keys(row)) assert(['id', 'summary', 'chapter'].includes(key), key);
+});
+test('chapter is an exact Event scope and is rejected for other labels', async () => {
+  const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:'test'},{});let filter;
+  const store={close:async()=>{},searchEvidence:async(v,f)=>{filter=f;return [];},evidenceLinks:async()=>({links:[],limited:false})};
+  const service=new MemoryService(cfg,undefined,store);
+  try{
+    await service.call('memory_database_search',{chapter:81});
+    assert.deepEqual(filter,{entity:undefined,date:undefined,chapter:81});
+    await assert.rejects(service.call('memory_database_search',{chapter:81,target_label:'Person'}),/only supported for Event/);
+    await assert.rejects(service.call('memory_database_search',{chapter:0}),/Invalid chapter/);
+  }finally{await service.close();}
+});
 test('date/entity search and source reading require no model key; unsupported follow-ups fail before lookup', async () => {
   const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:'test'},{});let filter;
   const store={close:async()=>{},searchEvidence:async(v,f)=>{assert.equal(v,undefined);filter=f;return [event('event_1')];},evidenceLinks:async()=>({links:[],limited:false}),readEvidence:async(id,start,limit)=>({kind:'source',id,range:[start,start+limit],text:'原文',total:50,next:start+limit})};
@@ -47,4 +98,41 @@ test('graph expansion reuses the initial vector and filters, returns a delta, an
   cfg.embeddingModel='another-model';await assert.rejects(service.call('memory_database_search',{operation:'expand',cursor:more.data.cursor,concept_id:'concept_1'}),/settings changed/);
   const cached=service.evidenceCursors.get(initial.data.cursor);cached.expires=0;
   await assert.rejects(service.call('memory_database_search',{operation:'expand',cursor:initial.data.cursor,concept_id:'concept_1'}),/cursor expired/);
+});
+
+test('time_hint accepts years, months, days and inclusive ranges and ignores a trailing time', () => {
+  assert.deepEqual(dateRange('2026-10-27'),{start:'2026-10-27',end:'2026-10-28'});
+  assert.deepEqual(dateRange('2026-10'),{start:'2026-10-01',end:'2026-11-01'});
+  assert.deepEqual(dateRange('2026-12'),{start:'2026-12-01',end:'2027-01-01'});
+  assert.deepEqual(dateRange('2026'),{start:'2026-01-01',end:'2027-01-01'});
+  assert.deepEqual(dateRange('2023-05-20..2023-05-27'),{start:'2023-05-20',end:'2023-05-28'});
+  assert.deepEqual(dateRange('2023-05-20..2023-05-20'),{start:'2023-05-20',end:'2023-05-21'});
+  assert.deepEqual(dateRange('2023-05-25T13:47:00'),{start:'2023-05-25',end:'2023-05-26'});
+  for (const bad of ['', 'yesterday', '2023-13-01', '2023-02-30', '2023-05-20..2023-05-01', '2023..2024..2025']) assert.equal(dateRange(bad), undefined, bad);
+});
+
+test('per-session diversity cap only limits the primary slots and keeps relevance order', () => {
+  const rows=[];
+  for (const session of ['a','b','c','d','e']) for (let i=1;i<=3;i++) rows.push({ ...event(`${session}${i}`), session });
+  assert.deepEqual(sessionDiverse(rows,8,2).map(e=>e.id),['a1','a2','b1','b2','c1','c2','d1','d2']);
+  assert.deepEqual(sessionDiverse(rows,8,0).map(e=>e.id),['a1','a2','a3','b1','b2','b3','c1','c2']);
+  assert.deepEqual(sessionDiverse(rows.filter(e=>e.session==='a'),8,2).map(e=>e.id),['a1','a2','a3']);
+  assert.deepEqual(sessionDiverse([],8,2),[]);
+});
+
+test('nearby falls back to session order when an event has no chapter/record id', async () => {
+  const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:'test'},{});
+  const store=new Neo4jStore(cfg), calls=[];
+  store.run=async (query,params)=>{calls.push({query,params});
+    if(query.includes('evidence:anchor'))return [{session:'sharegpt_1',time:'2023-05-20T02:21:03+00:00'}];
+    return [{id:query.includes('create_time < $time')?'event_2':'event_4'}];};
+  try{
+    assert.deepEqual((await store.nearbyEvidence('event_3',[],{},2,2,8)).map(e=>e.id),['event_2','event_4']);
+    assert.equal(calls.length,3);
+    assert(calls[1].params.session==='sharegpt_1');assert(calls[1].params.time==='2023-05-20T02:21:03+00:00');
+    assert(calls[1].query.includes('e.create_time < $time')&&calls[1].query.includes('ORDER BY e.create_time DESC'));
+    assert(calls[2].query.includes('e.create_time > $time')&&calls[2].query.includes('ORDER BY e.create_time ASC'));
+    store.run=async query=>query.includes('evidence:anchor')?[{session:null,time:null}]:[];
+    await assert.rejects(store.nearbyEvidence('event_3',[],{},2,2,8),/no reliable chapter\/record or session position/);
+  }finally{await store.close();}
 });

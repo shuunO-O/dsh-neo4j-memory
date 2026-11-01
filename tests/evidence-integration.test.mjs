@@ -8,7 +8,7 @@ import { MemoryService } from '../lib/service.js';
 import { LocalNeo4j } from '../lib/runtime.js';
 import { renderMemoryEvidence } from '../lib/evidence.js';
 
-test('isolated Neo4j: four-event evidence, actual global degree, source offsets and filtered resumable graph expansion', {skip:process.env.DSH_NEO4J_MEMORY_INTEGRATION!=='1',timeout:180000},async t=>{
+test('isolated Neo4j: layered evidence, actual global degree, source offsets and filtered resumable graph expansion', {skip:process.env.DSH_NEO4J_MEMORY_INTEGRATION!=='1',timeout:180000},async t=>{
   await mkdir(join(process.cwd(),'tmp'),{recursive:true});const root=await mkdtemp(join(process.cwd(),'tmp','evidence-integration-')),runtime=new LocalNeo4j(root);let service;
   t.after(async()=>{await service?.close();await runtime.stop();});const info=await runtime.ensure();
   const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:info.password,embeddingApiKey:'fixture',embeddingDimensions:2},{DSH_NEO4J_MEMORY_NEO4J_URI:info.uri});
@@ -21,14 +21,14 @@ test('isolated Neo4j: four-event evidence, actual global degree, source offsets 
   await service.store.run('UNWIND $rows AS row CREATE (e:Event) SET e=row WITH e MATCH (c:Concept {id:"concept_1"}) CREATE (e)-[:MENTIONS]->(c)',{rows});
   await service.store.run('MATCH (e:Event {id:"event_ch01_e01"}),(c:Concept {id:"concept_leaf"}) CREATE (e)-[:MENTIONS]->(c)');
   const initial=await service.call('memory_database_search',{query_text:'部署计划',entity_filter:'部署',time_hint:'2026-10-24'});
-  assert.equal(initial.data.events.length,4);assert.equal(initial.data.events[0].id,'event_ch01_e01');assert.equal(initial.data.next.concepts.length,1);assert.equal(initial.data.next.concepts[0].remaining,20);
+  assert.equal(initial.data.events.length,8);assert.equal(initial.data.events[0].id,'event_ch01_e01');assert.equal(initial.data.next.concepts.length,1);assert.equal(initial.data.next.concepts[0].remaining,16);
   assert.equal(initial.data.shared[0].degree,24,'degree must describe the whole database, not only loaded nodes');assert(!JSON.stringify(initial.data).includes('concept_leaf'));assert.equal(calls,1);
   for(const row of initial.data.events)assert.equal(Array.from(rows.find(e=>e.id===row.id).content).slice(...row.quote.range).join(''),row.quote.text);
   const source=await service.call('memory_database_search',{operation:'read',event_id:'event_ch01_e01',start:1,limit:3});assert.equal(source.data.text,'😀乙丙');assert.deepEqual(source.data.range,[1,4]);
-  const nearby=await service.call('memory_database_search',{operation:'nearby',cursor:initial.data.cursor,event_id:'event_ch01_e04',before:2,after:2});
-  assert.deepEqual(nearby.data.events.map(e=>e.id),['event_ch01_e05','event_ch01_e06']);assert(nearby.data.events.every(e=>e.via==='nearby'));assert.equal(nearby.data.seen,6);
+  const nearby=await service.call('memory_database_search',{operation:'nearby',cursor:initial.data.cursor,event_id:'event_ch01_e08',before:2,after:2});
+  assert.deepEqual(nearby.data.events.map(e=>e.id),['event_ch01_e09','event_ch01_e10']);assert(nearby.data.events.every(e=>e.via==='nearby'));assert.equal(nearby.data.seen,10);
   const expanded=await service.call('memory_database_search',{operation:'expand',cursor:initial.data.cursor,concept_id:'concept_1'});
-  assert.deepEqual(expanded.data.events.map(e=>e.id),['event_ch01_e07','event_ch01_e08','event_ch01_e09']);assert.equal(expanded.data.seen,7);assert.equal(calls,1);
+  assert.deepEqual(expanded.data.events.map(e=>e.id),['event_ch01_e11','event_ch01_e12','event_ch01_e13']);assert.equal(expanded.data.seen,13);assert.equal(calls,1);
   assert(!renderMemoryEvidence(expanded.data).includes('Event:'));assert(!renderMemoryEvidence(expanded.data).includes('Concept:'));
   let current=expanded;while(current.data.seen<20)current=await service.call('memory_database_search',{operation:'expand',cursor:current.data.cursor,concept_id:'concept_1'});
   await assert.rejects(service.call('memory_database_search',{operation:'expand',cursor:current.data.cursor,concept_id:'concept_1'}),/budget of 20/);
@@ -50,19 +50,28 @@ test('isolated Neo4j: reembed builds atomic source chunks and content rescues a 
     res.end(JSON.stringify({data:body.input.map((text,index)=>({index,embedding:text.includes('暗号')?[1,0]:[0,1]}))}));});
   await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));t.after(()=>{http.closeAllConnections();return new Promise(resolve=>http.close(resolve));});cfg.embeddingUrl=`http://127.0.0.1:${http.address().port}`;
   service=new MemoryService(cfg);
-  const rows=[{id:'target',summary:'普通记录',content:'😀原文记录地下暗号。',embedding:[0,1]},...Array.from({length:45},(_,i)=>({id:`d${i}`,summary:'暗号',content:'',embedding:[1,0]}))];
+  const rows=[{id:'target',summary:'普通记录',content:'😀'.repeat(1300)+'原文记录地下暗号，已经入住三个月。',embedding:[0,1]},...Array.from({length:45},(_,i)=>({id:`d${i}`,summary:'暗号',content:'',embedding:[1,0]}))];
   await service.store.run('UNWIND $rows AS row CREATE (e:Event) SET e=row',{rows});
   const old=await service.call('memory_database_search',{query_text:'地下暗号'});
   assert(!old.data.events.some(e=>e.id==='target'));
   assert.equal((await service.store.run('MATCH (s:EventSource) RETURN count(s) AS total'))[0].total,0);
   await service.call('memory_database_reembed',{});
   const sources=await service.store.run('MATCH (s:EventSource) RETURN s.id AS id,s.text AS text,s.embedding AS vector ORDER BY id');
-  assert.equal(sources.length,1);assert(sources.some(s=>s.text.includes('😀')));
+  assert.equal(sources.length,2);assert(sources.some(s=>s.text.includes('😀')));
   const before=calls;
   const found=await service.call('memory_database_search',{query_text:'地下暗号',reset_seen:true});
   assert.equal(calls,before+1,'only the query embedding is called, never an LLM reranker');
   assert(found.data.events.some(e=>e.id==='target'));
+  const hit=found.data.events.find(e=>e.id==='target');
+  assert(hit.quote.text.includes('地下暗号'));assert(hit.quote.text.includes('已经入住三个月'));
+  assert.equal(Array.from(rows[0].content).slice(...hit.quote.range).join(''),hit.quote.text);
+  assert(hit.read.start<=1300 && hit.read.start+hit.read.limit>1315);
   assert(!JSON.stringify(found.data).includes('sourceHashes'));
+  const semantic=await service.call('memory_database_search',{operation:'read',event_id:'target',query_text:'地下暗号',top_k:1});
+  assert.equal(semantic.data.kind,'source_matches');assert.equal(semantic.data.ranking,'vector');
+  assert(semantic.data.passages[0].text.includes('地下暗号'));
+  assert.equal(Array.from(rows[0].content).slice(...semantic.data.passages[0].range).join(''),semantic.data.passages[0].text);
+  await assert.rejects(service.call('memory_database_search',{operation:'read',event_id:'missing',query_text:'地下暗号'}),/not found/);
   fail=true;await assert.rejects(service.call('memory_database_reembed',{}));
   assert.deepEqual(await service.store.run('MATCH (s:EventSource) RETURN s.id AS id,s.text AS text,s.embedding AS vector ORDER BY id'),sources);
 });

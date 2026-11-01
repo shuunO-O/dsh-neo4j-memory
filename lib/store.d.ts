@@ -3,13 +3,16 @@ import { ModelClient, type Extraction } from './api.js';
 import { type Candidate, type Decision } from './alignment.js';
 import type { MemoryConfig } from './config.js';
 import { type EvidenceEvent, type EvidenceLink, type SourceResult } from './evidence.js';
+import { type SourceMatch } from './source-search.js';
 export interface EvidenceFilter {
     entity?: string;
     date?: string;
+    chapter?: number;
 }
 export interface EvidenceSearchOptions {
     query?: string;
     exclude?: string[];
+    limit?: number;
 }
 export declare const indexes: Record<string, string>;
 export declare class EmbeddingMismatch extends Error {
@@ -71,6 +74,8 @@ export declare class Neo4jStore {
     private writeMemory;
     recallConcepts(name: string, vector: number[], limit: number, signal?: AbortSignal): Promise<Candidate[]>;
     private rankEvidence;
+    /** Full-text route over event summaries; Lucene BM25 order, fused later through RRF. */
+    private keywordCandidates;
     searchEvidence(vector: number[] | undefined, filter: EvidenceFilter, signal?: AbortSignal, options?: EvidenceSearchOptions): Promise<EvidenceEvent[]>;
     evidenceLinks(ids: string[], vector: number[] | undefined, signal?: AbortSignal): Promise<{
         links: EvidenceLink[];
@@ -79,6 +84,10 @@ export declare class Neo4jStore {
     evidenceExisting(ids: string[], signal?: AbortSignal): Promise<void>;
     expandEvidence(conceptId: string, seen: string[], vector: number[] | undefined, filter: EvidenceFilter, limit: number, signal?: AbortSignal, options?: EvidenceSearchOptions): Promise<EvidenceEvent[]>;
     nearbyEvidence(eventId: string, seen: string[], filter: EvidenceFilter, before: number, after: number, limit: number, signal?: AbortSignal, exclude?: string[]): Promise<EvidenceEvent[]>;
+    searchEventSource(eventId: string, vector: number[], signal?: AbortSignal): Promise<{
+        total: number;
+        rows: SourceMatch[];
+    }>;
     readEvidence(eventId: string, start: number, limit: number, signal?: AbortSignal): Promise<SourceResult>;
     search(query: string | undefined, label: string, entity: string | undefined, date: string | undefined, client: ModelClient): Promise<any>;
     graph(selected?: string[], signal?: AbortSignal): Promise<any>;
