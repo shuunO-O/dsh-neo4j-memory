@@ -89,7 +89,7 @@ test('alignment reuses only one confident identity and falls back on incomplete 
   const records = [{ id: 'concept_new', name: 'TS', label: 'Concept', embedding: [1, 0] }];
   const recall = async () => [{ id: 'concept_old', name: 'TypeScript', aliases: [], events: [], first_context: 'language' }];
   const [aligned] = await alignConcepts(new ModelClient(cfg), records, 'TypeScript language', '学习', recall);
-  assert.equal(aligned.action, 'reuse'); assert.equal(aligned.target_id, 'concept_old');
+  assert.equal(aligned.action, 'join'); assert.equal(aligned.target_id, 'concept_old');
   incomplete = true;
   const [pending] = await alignConcepts(new ModelClient(cfg), records, 'TS', '学习', recall);
   assert.equal(pending.action, 'create'); assert.equal(pending.reason, 'jev_error');
@@ -119,7 +119,7 @@ test('alignment threshold is configurable and records the decision bounds', asyn
   assert.equal(strict.different_probability, 0.93);
   cfg.alignmentThreshold = 0.96;
   const [loose] = await alignConcepts(new ModelClient(cfg), records, 'TypeScript language', '学习', recall);
-  assert.equal(loose.action, 'reuse');
+  assert.equal(loose.action, 'join');
   assert.equal(loose.target_id, 'concept_old');
 });
 test('live config refresh updates a running service without restarting it', () => {
@@ -162,7 +162,7 @@ test('transaction reuses actual entity ID and rolls back missing relationship en
     queries.push([q, p]);
     if (q.startsWith('MERGE (n:Person')) return { records: [record({ id: 'person_existing' })] };
     if (q.includes('RETURN count(r)')) return { records: [record({ written })] };
-    if (q.includes('RETURN n.id AS id')) return { records: [record({ id: 'concept_existing' })] };
+    if (q.includes('RETURN n.id AS id')) return { records: [record({ id: 'concept_existing', name: 'TypeScript', aliases: [] })] };
     return { records: [] };
   }, commit: async () => { committed++; }, rollback: async () => { rolledBack++; } };
   const driver = { session: () => ({

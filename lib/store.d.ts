@@ -72,6 +72,12 @@ export declare class Neo4jStore {
     }>;
     private saveMemory;
     private writeMemory;
+    private writeConcept;
+    /** Detach membership only; every Event keeps its original Concept endpoint. */
+    detachConcept(conceptId: string, signal?: AbortSignal): Promise<{
+        id: string;
+        group_id: string;
+    }>;
     recallConcepts(name: string, vector: number[], limit: number, signal?: AbortSignal): Promise<Candidate[]>;
     private rankEvidence;
     /** Full-text route over event summaries; Lucene BM25 order, fused later through RRF. */

@@ -25,7 +25,7 @@ export const Config = z ? z.object({
   alignmentApiKey: z.string().role('secret').volatile().default('')
     .description('Legacy alignment key, migrated to DSH credentials. TYPESAFE_API_KEY overrides saved credentials. Only required while concept alignment is enabled.'),
   conceptAlignment: z.boolean().volatile().default(true)
-    .description('Run the TypeSafe concept alignment pass before writing Concept nodes. Disable it to skip those model calls and reuse concepts only by exact name or alias.'),
+    .description('Compare incoming concepts with equivalence groups before writing. Semantic matches retain separate Concept nodes in the same group. Disable to reuse only deterministic name spellings or legacy aliases.'),
   extractionBaseUrl: z.string().volatile().default('https://api.deepseek.com')
     .description('Base URL for the extraction chat API; defaults to https://api.deepseek.com.'),
   extractionModel: z.string().volatile().default('deepseek-flash')
@@ -41,7 +41,7 @@ export const Config = z ? z.object({
   alignmentModel: z.string().volatile().default('jev')
     .description('Concept alignment model name; defaults to jev.'),
   alignmentThreshold: z.number().min(0.8).max(0.99).volatile().default(0.95)
-    .description('Minimum identity probability for reusing an existing concept. The opposite-candidate threshold is five points lower.'),
+    .description('Minimum identity probability for joining an existing concept group. The opposite-candidate threshold is five points lower.'),
   neo4jMode: z.string().volatile().default('auto')
     .description('auto uses the local Neo4j (downloaded on first use) unless NEO4J_PASSWORD or DSH_NEO4J_MEMORY_NEO4J_URI is set; managed always uses the local database; external always connects to the configured server.'),
   neo4jPassword: z.string().role('secret').volatile().default('')

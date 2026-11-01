@@ -120,6 +120,13 @@ export class MemoryService {
       return this.store.graph(selected, signal);
     }
     if (this.reembedding) throw new Error('Memory is being re-vectorized; try again when it finishes');
+    if (method === 'memory_database_concept_detach') {
+      const conceptId = text('concept_id', 500).replace(/^Concept:/u, '');
+      if (!conceptId) throw new Error('concept_id is required');
+      const data = await this.store.detachConcept(conceptId, signal);
+      this.evidenceCursors.clear();
+      return { status: 'ok', data };
+    }
     if (method === 'memory_database_save') {
       const content = text('content', 32000), source = text('session_id', 200) || 'dsh';
       if (!content) throw new Error('content cannot be empty');
@@ -128,7 +135,7 @@ export class MemoryService {
       await this.store.ensureIndexes(signal);
       const extraction = await client.extract(content);
       const saved = await this.store.save(content, source, extraction, client);
-      return { status: 'ok', event_id: saved.event_id, concept_alignment: saved.decisions.map(d => Object.fromEntries(['mention', 'target_id', 'action', 'status', 'reason', 'error_code'].filter(k => k in d).map(k => [k, (d as unknown as Record<string, unknown>)[k]]))) };
+      return { status: 'ok', event_id: saved.event_id, concept_alignment: saved.decisions.map(d => Object.fromEntries(['mention', 'target_id', 'group_id', 'action', 'status', 'reason', 'error_code'].filter(k => k in d).map(k => [k, (d as unknown as Record<string, unknown>)[k]]))) };
     }
     if (method === 'memory_database_search') {
       const operation = args.operation ?? 'search', owner = text('session_id', 200) || 'dsh';

@@ -58,7 +58,7 @@ read无需cursor或模型Key，limit为1–10000字符，返回原文、范围�
 {"operation":"expand","cursor":"上次返回的cursor","concept_id":"concept_3","limit":3}
 ```
 
-沿`Event → MENTIONS → Concept ← MENTIONS ← Event`找候选，保留原查询与筛选条件；有原问题向量时使用相同混合重排。只允许当前游标提供的Concept入口，不调用新的embedding或规划模型。limit兼容1–8，但实际新增上限为4且不超过追查链剩余额度。
+沿`Event → MENTIONS → Concept（含同等价组成员）← MENTIONS ← Event`找候选，保留原查询与筛选条件；有原问题向量时使用相同混合重排。组内多个Concept关联同一Event时只计一次；共享概念、全库关联事件数和继续入口也按组去重。实体名筛选命中任一组成员后覆盖组内所有成员的事件。只允许当前游标提供的Concept入口，不调用新的embedding或规划模型。limit兼容1–8，但实际新增上限为4且不超过追查链剩余额度。移出概念组后需要重新搜索获取游标。
 
 ```json
 {"operation":"nearby","cursor":"上次返回的cursor","event_id":"event_ch33_e06","before":2,"after":2}

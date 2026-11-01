@@ -5,10 +5,15 @@ import { alignConcepts, type Candidate, type Decision, type EntityRecord } from 
 import type { MemoryConfig } from './config.js';
 import { dateRange, EVIDENCE_LIMITS, sourcePosition, type EvidenceEvent, type EvidenceLink, type SourceResult } from './evidence.js';
 import { uniqueSourceMatches, type SourceMatch } from './source-search.js';
+import { randomUUID } from 'node:crypto';
+import { conceptGroups, conceptNameKey } from './concepts.js';
 
 export interface EvidenceFilter { entity?: string; date?: string; chapter?: number }
 export interface EvidenceSearchOptions { query?: string; exclude?: string[]; limit?: number }
-const evidenceWhere = (alias: string) => `($entity IS NULL OR EXISTS { MATCH (${alias})-[]-(m) WHERE m.name=$entity OR $entity IN coalesce(m.aliases,[]) })
+const evidenceWhere = (alias: string) => `($entity IS NULL OR EXISTS { MATCH (${alias})-[]-(m) WHERE m.name=$entity OR $entity IN coalesce(m.aliases,[]) }
+  OR EXISTS { MATCH (${alias})-[:MENTIONS]->(m:Concept), (named:Concept)
+    WHERE (named.name=$entity OR $entity IN coalesce(named.aliases,[]) OR named.name_key=$entity_key)
+      AND coalesce(m.equivalence_group,m.id)=coalesce(named.equivalence_group,named.id) })
   AND ($date_start IS NULL OR ${alias}.create_time >= $date_start)
   AND ($date_end IS NULL OR ${alias}.create_time < $date_end)
   AND ($chapter IS NULL OR ${alias}.chapter = $chapter)`;
@@ -19,7 +24,7 @@ const evidenceFields = (alias: string) => `${alias}.id AS id,coalesce(${alias}.s
 const evidenceParams = (filter: EvidenceFilter, vector?: number[]) => {
   const range = filter.date ? dateRange(filter.date) : undefined;
   return {
-    entity: filter.entity ?? null, chapter: filter.chapter == null ? null : neo4j.int(filter.chapter),
+    entity: filter.entity ?? null, entity_key: filter.entity ? conceptNameKey(filter.entity) : null, chapter: filter.chapter == null ? null : neo4j.int(filter.chapter),
     date_start: range?.start ?? null, date_end: range?.end ?? null,
     vector: vector ?? null, source_window: neo4j.int(EVIDENCE_LIMITS.sourceWindow),
   };
@@ -60,6 +65,13 @@ export class Neo4jStore {
       await this.run('CREATE CONSTRAINT memory_sequence_id IF NOT EXISTS FOR (c:MemorySequence) REQUIRE c.id IS UNIQUE', {}, signal);
       await this.run('CREATE CONSTRAINT memory_source_id IF NOT EXISTS FOR (s:EventSource) REQUIRE s.id IS UNIQUE', {}, signal);
       await this.run('CREATE INDEX event_chapter IF NOT EXISTS FOR (e:Event) ON (e.chapter)', {}, signal);
+      await this.run('CREATE INDEX concept_name_key IF NOT EXISTS FOR (c:Concept) ON (c.name_key)', {}, signal);
+      await this.run('CREATE INDEX concept_equivalence_group IF NOT EXISTS FOR (c:Concept) ON (c.equivalence_group)', {}, signal);
+      // Preserve legacy nodes and aliases: historical hard merges cannot be reconstructed.
+      const legacy = await this.run('MATCH (n:Concept) WHERE n.name_key IS NULL RETURN n.id AS id,n.name AS name', {}, signal);
+      if (legacy.length) await this.run('UNWIND $rows AS row MATCH (n:Concept {id:row.id}) WHERE n.name_key IS NULL SET n.name_key=row.key', {
+        rows: legacy.filter(n => n.id && typeof n.name === 'string').map(n => ({ id: n.id, key: conceptNameKey(n.name) })),
+      }, signal);
       await this.assertEmbeddingReady(signal);
       await this.createVectorIndexes(this.config.dimensions, signal);
       // Experimental lexical route (off by default). It only pays off when the query already
@@ -276,27 +288,9 @@ export class Neo4jStore {
     const names = new Map<string, string>();
     for (const rec of records) {
       signal?.throwIfAborted();
-      const alignment = rec.alignment;
-      if (rec.label === 'Concept' && alignment) {
-        if (alignment.action === 'reuse') {
-          const result = await tx.run('MATCH (n:Concept {id: $id}) RETURN n.id AS id, n.name AS name', { id: alignment.target_id });
-          if (result.records.length !== 1) throw new Error('Alignment target missing or duplicated; memory rolled back');
-          if (rec.name !== result.records[0].get('name')) await tx.run(`MATCH (n:Concept {id: $id}) SET n.aliases = CASE WHEN $name IN coalesce(n.aliases, []) THEN n.aliases ELSE coalesce(n.aliases, []) + [$name] END`, { id: alignment.target_id, name: rec.name });
-          names.set(rec.name, alignment.target_id);
-        } else {
-          await tx.run(`CREATE (n:Concept {id: $id, name: $name, embedding: $embedding, first_context: $context,
-            embedding_model: $embedding_model, embedding_dim: $embedding_dim})`, {
-            id: rec.id, name: rec.name, embedding: rec.embedding, context: rec.first_context,
-            embedding_model: this.config.embeddingModel, embedding_dim: neo4j.int(this.config.dimensions),
-          });
-          names.set(rec.name, rec.id);
-        }
+      if (rec.label === 'Concept') {
+        names.set(rec.name, await this.writeConcept(tx, rec, signal));
       } else {
-        if (rec.label === 'Concept') {
-          const existing = await tx.run('MATCH (n:Concept) WHERE n.name=$name OR $name IN coalesce(n.aliases, []) RETURN n.id AS id', { name: rec.name });
-          if (existing.records.length > 1 || (existing.records.length && !existing.records[0].get('id'))) throw new Error('Ambiguous Concept name or alias; memory rolled back');
-          if (existing.records.length) { names.set(rec.name, existing.records[0].get('id')); continue; }
-        }
         const result = await tx.run(`MERGE (n:${rec.label} {name: $name}) ON CREATE SET n.id=$id, n.embedding=$embedding,
           n.embedding_model=$embedding_model, n.embedding_dim=$embedding_dim RETURN n.id AS id`, {
           name: rec.name, id: rec.id, embedding: rec.embedding, embedding_model: this.config.embeddingModel, embedding_dim: neo4j.int(this.config.dimensions),
@@ -320,23 +314,87 @@ export class Neo4jStore {
       if (result.records.length !== 1 || Number(result.records[0].get('written')) !== 1) throw new Error('Relationship endpoint missing or duplicated; memory rolled back');
     }
   }
+  private async writeConcept(tx: Transaction, rec: EntityRecord, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    const decision = rec.alignment;
+    if (!decision || decision.action === 'reuse') {
+      const result = decision
+        ? await tx.run('MATCH (n:Concept {id:$id}) RETURN n.id AS id,n.name AS name,n.name_key AS name_key,coalesce(n.aliases,[]) AS aliases', { id: decision.target_id })
+        : await tx.run('MATCH (n:Concept) WHERE n.name_key=$key OR n.name=$name OR $name IN coalesce(n.aliases,[]) RETURN n.id AS id,n.name AS name,n.name_key AS name_key,coalesce(n.aliases,[]) AS aliases', { name: rec.name, key: conceptNameKey(rec.name) });
+      if (result.records.length > 1 || (decision && result.records.length !== 1)) throw new Error('Ambiguous or missing Concept name; memory rolled back');
+      if (result.records.length) {
+        const old = result.records[0];
+        if (!old.get('id')) throw new Error('Concept ID missing; memory rolled back');
+        if (decision && ![old.get('name'), ...(old.get('aliases') ?? [])].some(name => conceptNameKey(name) === conceptNameKey(rec.name))) throw new Error('Concept spelling changed; memory rolled back');
+        await tx.run(`MATCH (n:Concept {id:$id}) SET n.name_key=$key,
+          n.aliases=CASE WHEN n.name=$name OR $name IN coalesce(n.aliases,[]) THEN coalesce(n.aliases,[]) ELSE coalesce(n.aliases,[])+[$name] END`,
+          { id: old.get('id'), key: conceptNameKey(old.get('name')), name: rec.name });
+        return old.get('id');
+      }
+    }
+    let group: string | undefined;
+    if (decision?.action === 'join') {
+      const target = await tx.run('MATCH (n:Concept {id:$id}) RETURN n.id AS id,coalesce(n.equivalence_group,n.id) AS group_id', { id: decision.target_id });
+      if (target.records.length !== 1 || !target.records[0].get('id')) throw new Error('Alignment target missing or duplicated; memory rolled back');
+      group = target.records[0].get('group_id');
+      if (decision.group_id && group !== decision.group_id) throw new Error('Concept group changed during alignment; retry save');
+      decision.group_id = group;
+    }
+    await tx.run(`CREATE (n:Concept {id:$id,name:$name,name_key:$key,embedding:$embedding,first_context:$context,
+      embedding_model:$model,embedding_dim:$dimensions})
+      SET n.equivalence_group=$group, n.group_joined_at=$joined_at`, {
+      id: rec.id, name: rec.name, key: conceptNameKey(rec.name), embedding: rec.embedding, context: rec.first_context ?? '',
+      model: this.config.embeddingModel, dimensions: neo4j.int(this.config.dimensions), group: group ?? null,
+      joined_at: group ? localTimestamp(this.config.timezone) : null,
+    });
+    return rec.id;
+  }
+  /** Detach membership only; every Event keeps its original Concept endpoint. */
+  async detachConcept(conceptId: string, signal?: AbortSignal): Promise<{ id: string; group_id: string }> {
+    const pending = this.saveTail.then(async () => {
+      const group = `concept_group_${randomUUID()}`;
+      const rows = await this.run(`MATCH (n:Concept {id:$id}) WITH collect(n) AS nodes
+        WHERE size(nodes)=1 WITH nodes[0] AS n
+        SET n.equivalence_group=$group,n.group_joined_at=null
+        RETURN n.id AS id,n.equivalence_group AS group_id`, { id: conceptId, group }, signal);
+      if (rows.length !== 1) throw new Error('Concept not found or ambiguous');
+      return rows[0];
+    });
+    this.saveTail = pending.catch(() => {});
+    return pending;
+  }
   async recallConcepts(name: string, vector: number[], limit: number, signal?: AbortSignal): Promise<Candidate[]> {
-    const exact = await this.run('MATCH (n:Concept) WHERE n.name=$name OR $name IN coalesce(n.aliases, []) RETURN n.id AS id ORDER BY n.id LIMIT $limit', { name, limit: neo4j.int(limit + 1) }, signal);
-    if (exact.length > limit || exact.some(r => !r.id)) throw new Error('ambiguous_or_invalid_exact_candidates');
-    const similar = await this.run("CALL db.index.vector.queryNodes('concept_embedding', $top_k, $vector) YIELD node, score WHERE node:Concept RETURN node.id AS id ORDER BY score DESC", { top_k: neo4j.int(limit), vector }, signal);
-    if (similar.some(r => !r.id)) throw new Error('candidate_missing_id');
+    const exact = await this.run('MATCH (n:Concept) WHERE n.name_key=$key OR n.name=$name OR $name IN coalesce(n.aliases, []) RETURN n.id AS id ORDER BY n.id', { name, key: conceptNameKey(name) }, signal);
+    if (exact.some(r => !r.id)) throw new Error('invalid_exact_candidates');
+    // A group with many spellings must not consume every nearest-neighbor slot.
+    let width = limit;
+    let similar: { id: string; group_id?: string }[] = [];
+    for (;;) {
+      const hits = await this.run("CALL db.index.vector.queryNodes('concept_embedding', $top_k, $vector) YIELD node, score WHERE node:Concept RETURN node.id AS id,coalesce(node.equivalence_group,node.id) AS group_id ORDER BY score DESC,node.id", { top_k: neo4j.int(width), vector }, signal);
+      if (hits.some(r => !r.id)) throw new Error('candidate_missing_id');
+      similar = [...new Map(hits.map(r => [r.group_id ?? r.id, r])).values()].slice(0, limit);
+      if (similar.length >= limit || hits.length < width || width >= 4096) break;
+      width = Math.min(4096, width * 2);
+    }
     const ids = [...new Set([...exact, ...similar].map(r => r.id))];
     if (!ids.length) return [];
-    const candidates = await this.run(`UNWIND $ids AS candidate_id MATCH (n:Concept {id:candidate_id})
+    const candidates = await this.run(`UNWIND $ids AS candidate_id MATCH (hit:Concept {id:candidate_id})
+      WITH DISTINCT coalesce(hit.equivalence_group,hit.id) AS group_id
+      MATCH (n:Concept) WHERE coalesce(n.equivalence_group,n.id)=group_id
       CALL { WITH n MATCH (e:Event)-[:MENTIONS]->(n) WITH e ORDER BY e.create_time DESC LIMIT 3 RETURN collect(left(e.summary,300)) AS events }
-      RETURN n.id AS id, n.name AS name, coalesce(n.aliases,[])[..20] AS aliases, left(coalesce(n.first_context,''),500) AS first_context, events`, { ids }, signal);
-    if (candidates.length !== ids.length || new Set(candidates.map(c => c.id)).size !== ids.length) throw new Error('candidate_changed_or_duplicate_id');
-    return candidates;
+      RETURN n.id AS id,group_id,n.name AS name,coalesce(n.aliases,[]) AS aliases,left(coalesce(n.first_context,''),500) AS first_context,events
+      ORDER BY group_id,n.id`, { ids }, signal);
+    if (new Set(candidates.map(c => c.id)).size !== candidates.length || ids.some(id => !candidates.some(c => c.id === id))) throw new Error('candidate_changed_or_duplicate_id');
+    return conceptGroups(candidates);
   }
   private async rankEvidence(vector: number[], filter: EvidenceFilter, options: EvidenceSearchOptions, signal?: AbortSignal, conceptId?: string, anchors: string[] = [], limit: number = options.limit ?? EVIDENCE_LIMITS.events): Promise<EvidenceEvent[]> {
     const params = { ...evidenceParams(filter, vector), excluded: options.exclude ?? [], candidates: neo4j.int(RETRIEVAL.candidates), concept_id: conceptId ?? null, anchors };
     const where = `e.id IS NOT NULL AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
-      AND ($concept_id IS NULL OR EXISTS { MATCH (e)-[:MENTIONS]->(c:Concept {id:$concept_id})<-[:MENTIONS]-(a:Event) WHERE a.id IN $anchors })`;
+      AND ($concept_id IS NULL OR EXISTS {
+        MATCH (c:Concept {id:$concept_id}), (e)-[:MENTIONS]->(member:Concept), (a:Event)-[:MENTIONS]->(anchorConcept:Concept)
+        WHERE a.id IN $anchors
+          AND coalesce(member.equivalence_group,member.id)=coalesce(c.equivalence_group,c.id)
+          AND coalesce(anchorConcept.equivalence_group,anchorConcept.id)=coalesce(c.equivalence_group,c.id) })`;
     // Exact ranking preserves filtering and refills after delivered-ID exclusion. Only
     // the top 40 distinct events from each route cross the driver boundary.
     const fields = `${evidenceFields('e')},e.embedding AS vector,
@@ -381,12 +439,17 @@ export class Neo4jStore {
     if (!ids.length) return { links: [], limited: false };
     const rows = await this.run(`/* evidence:links */ UNWIND $ids AS event_id MATCH (e:Event {id:event_id})
       CALL { WITH e MATCH (e)-[:MENTIONS]->(c:Concept) WHERE c.id IS NOT NULL
-        WITH DISTINCT c
-        CALL { WITH c MATCH (related:Event)-[:MENTIONS]->(c) RETURN count(DISTINCT related) AS degree }
-        WITH c,degree WHERE degree>1
-        WITH c,degree,CASE WHEN $vector IS NULL OR c.embedding IS NULL THEN 0.0 ELSE vector.similarity.cosine(c.embedding,$vector) END AS score
-        ORDER BY score DESC,c.id LIMIT $concept_limit
-        RETURN collect({conceptId:c.id,name:coalesce(c.name,c.id),degree:degree,score:score}) AS links }
+        WITH DISTINCT coalesce(c.equivalence_group,c.id) AS group_id
+        MATCH (member:Concept) WHERE coalesce(member.equivalence_group,member.id)=group_id
+        WITH group_id,member ORDER BY member.id
+        WITH group_id,collect(member) AS members
+        CALL { WITH members UNWIND members AS m MATCH (related:Event)-[:MENTIONS]->(m) RETURN count(DISTINCT related) AS degree }
+        WITH members[0] AS representative,degree,
+          reduce(best=0.0,m IN members | CASE WHEN $vector IS NULL OR m.embedding IS NULL THEN best
+            ELSE CASE WHEN vector.similarity.cosine(m.embedding,$vector)>best THEN vector.similarity.cosine(m.embedding,$vector) ELSE best END END) AS score
+        WHERE degree>1
+        ORDER BY score DESC,representative.id LIMIT $concept_limit
+        RETURN collect({conceptId:representative.id,name:coalesce(representative.name,representative.id),degree:degree,score:score}) AS links }
       RETURN e.id AS eventId,links`, { ids, vector: vector ?? null, concept_limit: neo4j.int(EVIDENCE_LIMITS.conceptsPerEvent + 1) }, signal);
     return { links: rows.flatMap(row => row.links.slice(0, EVIDENCE_LIMITS.conceptsPerEvent).map((c: Omit<EvidenceLink, 'eventId'>) => ({ ...c, eventId: row.eventId }))), limited: rows.some(row => row.links.length > EVIDENCE_LIMITS.conceptsPerEvent) };
   }
@@ -396,13 +459,14 @@ export class Neo4jStore {
   }
   async expandEvidence(conceptId: string, seen: string[], vector: number[] | undefined, filter: EvidenceFilter, limit: number, signal?: AbortSignal, options: EvidenceSearchOptions = {}): Promise<EvidenceEvent[]> {
     if (vector) return this.rankEvidence(vector, filter, { ...options, exclude: [...new Set([...seen, ...(options.exclude ?? [])])] }, signal, conceptId, seen, limit);
-    return this.run(`/* evidence:expand */ MATCH (e:Event)-[:MENTIONS]->(c:Concept {id:$concept_id})
-      WHERE e.id IS NOT NULL AND NOT e.id IN $seen AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
-        AND EXISTS { MATCH (anchor:Event)-[:MENTIONS]->(c) WHERE anchor.id IN $seen }
+    return this.run(`/* evidence:expand */ MATCH (c:Concept {id:$concept_id}), (e:Event)-[:MENTIONS]->(member:Concept)
+      WHERE coalesce(member.equivalence_group,member.id)=coalesce(c.equivalence_group,c.id)
+        AND e.id IS NOT NULL AND NOT e.id IN $seen AND NOT e.id IN $excluded AND ${evidenceWhere('e')}
+        AND EXISTS { MATCH (anchor:Event)-[:MENTIONS]->(ac:Concept) WHERE anchor.id IN $seen
+          AND coalesce(ac.equivalence_group,ac.id)=coalesce(c.equivalence_group,c.id) }
       WITH DISTINCT e
-      WITH e,CASE WHEN $vector IS NULL OR e.embedding IS NULL THEN 0.0 ELSE vector.similarity.cosine(e.embedding,$vector) END AS score
-      RETURN ${evidenceFields('e')} ORDER BY score DESC,e.create_time DESC,e.id LIMIT $limit`, {
-      ...evidenceParams(filter, vector), concept_id: conceptId, seen, excluded: options.exclude ?? [], limit: neo4j.int(limit),
+      RETURN ${evidenceFields('e')} ORDER BY e.create_time DESC,e.id LIMIT $limit`, {
+      ...evidenceParams(filter), concept_id: conceptId, seen, excluded: options.exclude ?? [], limit: neo4j.int(limit),
     }, signal);
   }
   async nearbyEvidence(eventId: string, seen: string[], filter: EvidenceFilter, before: number, after: number, limit: number, signal?: AbortSignal, exclude: string[] = []): Promise<EvidenceEvent[]> {
@@ -481,7 +545,7 @@ export class Neo4jStore {
   async graph(selected: string[] = [], signal?: AbortSignal): Promise<any> {
     const pick = (ls: string[]) => labels.find(l => ls.includes(l)) ?? ls[0] ?? 'Node';
     const key = (label: string, name: string, id: string) => `${label}:${label === 'Event' || (label === 'Concept' && id) ? id : name}`;
-    const rows = await this.run('MATCH (a) WHERE any(l IN labels(a) WHERE l IN $labels) RETURN labels(a) AS labels,a.id AS id,a.name AS name,a.type AS type,a.summary AS summary,a.content AS content,a.create_time AS create_time', { labels: selected.length ? selected : labels }, signal);
+    const rows = await this.run('MATCH (a) WHERE any(l IN labels(a) WHERE l IN $labels) RETURN labels(a) AS labels,a.id AS id,a.name AS name,a.type AS type,a.summary AS summary,a.content AS content,a.create_time AS create_time,CASE WHEN a:Concept THEN coalesce(a.equivalence_group,a.id) ELSE null END AS equivalence_group', { labels: selected.length ? selected : labels }, signal);
     const nodes = rows.map(({ labels: ls, id, ...r }) => ({ ...r, id: key(pick(ls), r.name, id), label: pick(ls) }));
     const valid = new Set(nodes.map(n => n.id));
     const edges = await this.run('MATCH (a)-[r]->(b) WHERE type(r) IN $types RETURN labels(a) AS a_labels,a.id AS a_id,a.name AS a_name,labels(b) AS b_labels,b.id AS b_id,b.name AS b_name,type(r) AS rel_type,properties(r) AS props', { types: relations }, signal);

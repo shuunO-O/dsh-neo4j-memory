@@ -27,7 +27,7 @@ test('isolated Neo4j: layered evidence, actual global degree, source offsets and
   const source=await service.call('memory_database_search',{operation:'read',event_id:'event_ch01_e01',start:1,limit:3});assert.equal(source.data.text,'😀乙丙');assert.deepEqual(source.data.range,[1,4]);
   const nearby=await service.call('memory_database_search',{operation:'nearby',cursor:initial.data.cursor,event_id:'event_ch01_e08',before:2,after:2});
   assert.deepEqual(nearby.data.events.map(e=>e.id),['event_ch01_e09','event_ch01_e10']);assert(nearby.data.events.every(e=>e.via==='nearby'));assert.equal(nearby.data.seen,10);
-  const expanded=await service.call('memory_database_search',{operation:'expand',cursor:initial.data.cursor,concept_id:'concept_1'});
+  const expanded=await service.call('memory_database_search',{operation:'expand',cursor:nearby.data.cursor,concept_id:'concept_1'});
   assert.deepEqual(expanded.data.events.map(e=>e.id),['event_ch01_e11','event_ch01_e12','event_ch01_e13']);assert.equal(expanded.data.seen,13);assert.equal(calls,1);
   assert(!renderMemoryEvidence(expanded.data).includes('Event:'));assert(!renderMemoryEvidence(expanded.data).includes('Concept:'));
   let current=expanded;while(current.data.seen<20)current=await service.call('memory_database_search',{operation:'expand',cursor:current.data.cursor,concept_id:'concept_1'});

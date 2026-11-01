@@ -157,6 +157,16 @@ Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分�
 
 图谱页：**设置 → Neo4j 记忆 → 展开图谱**，或访问 `/dsh-neo4j-memory/graph/`。只读，不写回 Neo4j；导出 JSON 只影响浏览器视图。
 
+### 可撤销的概念合并
+
+语义对齐采用等价组：不同叫法保留各自的 Concept，Event 始终连接原来的 Concept。对齐召回先按组去重，模型结合整组成员的名称、上下文和事件摘要判断新概念是否入组。多个不同组都被判为相同或证据不足时，不自动合并。Event 的实体筛选、共享概念统计与 `expand` 均按组处理，组内事件去重。
+
+确定的书写变体仍复用同一节点：去首尾空白、全角 ASCII 转半角、Unicode NFC；仅 `Neo4j / TypeScript / JavaScript / PostgreSQL / MySQL / Docker` 忽略大小写。保留标点及其他名称的大小写，不把 `US/us`、`C/C++` 或 `①/1` 自动合并。启用语义对齐时，其他同名概念仍结合上下文消歧。
+
+组成员存于 `Concept.equivalence_group`，缺失时以自身 ID 作为单独一组。维护接口 `backend.call('memory_database_concept_detach', { concept_id: 'concept_12' })` 将该节点移到新的单独组，不调用模型、不修改 Event 关系，并清除当前服务的追查游标。图谱仍为只读页面，可在节点属性中检查组 ID；本次未增加界面上的撤销按钮。
+
+旧库不改动 Event 关系，也不拆解历史 `aliases`；启动索引初始化时只补名称比较键。过去已经硬合并的别名无法凭现有信息恢复原来的 Event 归属，新的语义合并才具有上述可撤销性。
+
 ### 检索算法
 
 一次 `search`（`target_label=Event`）分五步，全部在本地完成，不额外调用模型：

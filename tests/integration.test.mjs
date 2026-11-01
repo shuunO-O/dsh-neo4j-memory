@@ -45,9 +45,9 @@ test('real Neo4j: legacy data, model HTTP, aligned writes, filtered/vector searc
   // Seed records with the exact schema/IDs used by the former Python implementation.
   await service.store.run("CREATE (:Concept {id:'concept_legacy',name:'TypeScript',embedding:[1.0,0.1],first_context:'programming language'}), (:Person {id:'person_legacy',name:'兼容用户',embedding:[1.0,0.1]})");
   const saved = await service.call('memory_database_save', { content: '兼容用户学习 TS 编程语言', session_id: 'integration' });
-  assert.equal(saved.status, 'ok'); assert.equal(saved.concept_alignment[0].target_id, 'concept_legacy'); assert.equal(saved.concept_alignment[0].action, 'reuse');
-  const entities = await service.store.run('MATCH (n:Concept) RETURN n.id AS id,n.aliases AS aliases');
-  assert.equal(entities.length, 1); assert.deepEqual(entities[0].aliases, ['TS']);
+  assert.equal(saved.status, 'ok'); assert.equal(saved.concept_alignment[0].target_id, 'concept_legacy'); assert.equal(saved.concept_alignment[0].action, 'join');
+  const entities = await service.store.run('MATCH (n:Concept) RETURN n.id AS id,n.name AS name,coalesce(n.equivalence_group,n.id) AS group_id');
+  assert.equal(entities.length, 2); assert(entities.some(n => n.name === 'TS')); assert(entities.every(n => n.group_id === 'concept_legacy'));
   const savedId = saved.event_id;
   await service.store.run("MATCH (e:Event {id:$id}) SET e.create_time='2026-10-24T10:30:00.123456'", { id: savedId });
   const vector = await service.call('memory_database_search', { query_text: '编程学习' });

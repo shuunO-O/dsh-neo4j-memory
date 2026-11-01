@@ -1,10 +1,6 @@
 import { ModelClient } from './api.js';
-export interface Candidate {
-    id: string;
-    name: string;
-    aliases: string[];
-    first_context: string;
-    events: string[];
+import { type ConceptCandidate } from './concepts.js';
+export interface Candidate extends ConceptCandidate {
 }
 export interface EntityRecord {
     id: string;
@@ -22,9 +18,10 @@ export interface Score {
 export interface Decision {
     mention: string;
     target_id: string;
-    action: 'create' | 'reuse';
+    action: 'create' | 'reuse' | 'join';
     status: string;
     reason: string;
+    group_id?: string;
     candidates: ({
         id: string;
     } | (Score & {
