@@ -42,12 +42,13 @@ test('evidence compression preserves exact Unicode ranges, qualifiers and real s
 });
 
 test('agent-facing rows are whitelisted and provenance stays compact', () => {
-  const base = { ...event('event_ch0053_e09'), chapter: 53, chapterTitle: '魔网', embedding: [0.1, 0.2], embedding_model: 'model-x', embedding_dim: 768, raw_session: 'dawn-ch0053', source_scenes: ['ch0053_s013'], sourceHashes: ['abc'] };
+  const base = { ...event('event_ch0053_e09'), chapter: 53, chapterTitle: '魔网', session: 'dawn-ch0053', embedding: [0.1, 0.2], embedding_model: 'model-x', embedding_dim: 768, raw_session: 'dawn-ch0053', source_scenes: ['ch0053_s013'], sourceHashes: ['abc'] };
   const related = { ...base, id: 'event_ch0053_e03', summary: '高文提出拆分法阵' };
   const data = buildEvidence([base], [], [base.id], '', 'initial', [], [related]);
   const text = renderMemoryEvidence(data);
-  assert(text.includes('event_ch0053_e09 [第53章 魔网] |'));
-  assert(text.includes('event_ch0053_e03 [第53章] |'));
+  assert(text.includes('event_ch0053_e09 [第53章 魔网] session="dawn-ch0053" |'));
+  assert(text.includes('event_ch0053_e03 [第53章] session="dawn-ch0053" |'));
+  assert.equal(data.events[0].session,'dawn-ch0053');assert.equal(data.related[0].session,'dawn-ch0053');
   assert(text.includes('read event_id=event_ch0053_e09 limit='));
   assert(!text.includes('事件内定位'));
   assert(!text.includes('核对原文'));
@@ -56,7 +57,12 @@ test('agent-facing rows are whitelisted and provenance stays compact', () => {
     assert(!text.includes(banned), banned);
   }
   for (const row of data.events) for (const key of Object.keys(row)) assert(AGENT_EVENT_FIELDS.includes(key), key);
-  for (const row of data.related) for (const key of Object.keys(row)) assert(['id', 'summary', 'chapter'].includes(key), key);
+  for (const row of data.related) for (const key of Object.keys(row)) assert(['id', 'summary', 'chapter', 'session'].includes(key), key);
+  const missing=buildEvidence([event('event_1')],[],['event_1'],'','initial',[],[{...event('event_2'),session:'   '}]);
+  assert(!('session' in missing.events[0]));assert(!('session' in missing.related[0]));assert(!renderMemoryEvidence(missing).includes('session='));
+  const special='conversation "quoted"\nnext';
+  const escaped=buildEvidence([{...event('event_1'),session:special}],[],['event_1'],'','added');
+  assert.equal(escaped.events[0].session,special);assert(renderMemoryEvidence(escaped).includes(`session=${JSON.stringify(special)}`));
 });
 test('chapter is an exact Event scope and is rejected for other labels', async () => {
   const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:'test'},{});let filter;
@@ -69,6 +75,32 @@ test('chapter is an exact Event scope and is rejected for other labels', async (
     await assert.rejects(service.call('memory_database_search',{chapter:0}),/Invalid chapter/);
   }finally{await service.close();}
 });
+test('source session scopes are independent of caller sessions and persist through continuation', async () => {
+  const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:'test'},{}), filters=[];
+  const store={close:async()=>{},searchEvidence:async(v,f)=>{assert.equal(v,undefined);filters.push(f);return [event('event_1')];},
+    evidenceExisting:async()=>{},evidenceLinks:async ids=>({links:ids.map(id=>({eventId:id,conceptId:'concept_1',name:'部署',degree:4,score:1})),limited:false}),
+    expandEvidence:async(id,seen,v,f)=>{filters.push(f);return [event('event_2')];},
+    nearbyEvidence:async(id,seen,f)=>{filters.push(f);return [event('event_3')];}};
+  const service=new MemoryService(cfg,undefined,store);
+  try{
+    const initial=await service.call('memory_database_search',{source_session:' source-123 ',session_id:'caller'});
+    assert.equal(initial.data.events.length,1);
+    assert.deepEqual(filters[0],{entity:undefined,date:undefined,sourceSession:'source-123'});
+    await assert.rejects(service.call('memory_database_search',{operation:'expand',cursor:initial.data.cursor,concept_id:'concept_1',session_id:'source-123'}),/cursor expired/);
+    const expanded=await service.call('memory_database_search',{operation:'expand',cursor:initial.data.cursor,concept_id:'concept_1',session_id:'caller'});
+    await service.call('memory_database_search',{operation:'nearby',cursor:expanded.data.cursor,event_id:'event_2',session_id:'caller'});
+    assert.deepEqual(filters[1],filters[0]);assert.deepEqual(filters[2],filters[0]);
+    await service.call('memory_database_search',{source_session:'source-123',chapter:81,time_hint:'2026-11',entity_filter:'部署',session_id:'combined'});
+    assert.deepEqual(filters[3],{entity:'部署',date:'2026-11',chapter:81,sourceSession:'source-123'});
+    for(const source_session of ['', ' ', 123, null, 'x'.repeat(201)])
+      await assert.rejects(service.call('memory_database_search',{source_session}),/source_session/);
+    for(const target_label of ['Person','Concept'])
+      await assert.rejects(service.call('memory_database_search',{source_session:'source-123',target_label}),/only supported for Event/);
+    for(const operation of ['read','expand','nearby'])
+      await assert.rejects(service.call('memory_database_search',{operation,source_session:'source-123'}),/original search conditions/);
+  }finally{await service.close();}
+});
+
 test('date/entity search and source reading require no model key; unsupported follow-ups fail before lookup', async () => {
   const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:'test'},{});let filter;
   const store={close:async()=>{},searchEvidence:async(v,f)=>{assert.equal(v,undefined);filter=f;return [event('event_1')];},evidenceLinks:async()=>({links:[],limited:false}),readEvidence:async(id,start,limit)=>({kind:'source',id,range:[start,start+limit],text:'原文',total:50,next:start+limit})};

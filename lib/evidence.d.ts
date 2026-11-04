@@ -12,7 +12,7 @@ export declare const EVIDENCE_LIMITS: Readonly<{
     cursorMs: number;
 }>;
 /** The only fields allowed to cross from the store into the model-facing evidence. */
-export declare const AGENT_EVENT_FIELDS: readonly ["id", "summary", "quote", "read", "via", "time", "chapter", "title"];
+export declare const AGENT_EVENT_FIELDS: readonly ["id", "summary", "quote", "read", "via", "time", "chapter", "title", "session"];
 export interface EvidenceEvent {
     id: string;
     summary: string;
@@ -26,7 +26,7 @@ export interface EvidenceEvent {
     sourceKind?: 'graph' | 'nearby';
     chapter?: number;
     chapterTitle?: string;
-    /** Grouping key for orderable sibling records; never rendered to the model. */
+    /** Source session ID, also usable as the search source_session scope. */
     session?: string | null;
 }
 export interface EvidenceLink {
@@ -57,6 +57,7 @@ export interface EvidenceRow {
     time?: string;
     chapter?: number;
     title?: string;
+    session?: string;
 }
 export interface EvidenceResult {
     kind: 'evidence';
@@ -69,6 +70,7 @@ export interface EvidenceResult {
         id: string;
         summary: string;
         chapter?: number;
+        session?: string;
     }[];
     shared: {
         concept: string;

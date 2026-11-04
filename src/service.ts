@@ -148,7 +148,7 @@ export class MemoryService {
         return value;
       };
       if (operation !== 'search') {
-        if (args.query_text && operation !== 'read' || args.entity_filter || args.time_hint || args.chapter !== undefined || args.target_label && args.target_label !== 'Event') throw new Error('Follow-up operations use the original search conditions; do not supply new search conditions');
+        if (args.query_text && operation !== 'read' || args.entity_filter || args.time_hint || args.chapter !== undefined || args.source_session !== undefined || args.target_label && args.target_label !== 'Event') throw new Error('Follow-up operations use the original search conditions; do not supply new search conditions');
         const eventId = resolveEventReference(text('event_id', 500), this.delivered(owner).ids);
         if (operation === 'read') {
           if (!eventId) throw new Error('event_id is required');
@@ -201,15 +201,18 @@ export class MemoryService {
       if (args.cursor || args.event_id || args.concept_id) throw new Error('Use operation=read, expand or nearby for continuation arguments');
       const query = text('query_text', 4000) || undefined, entity = text('entity_filter', 500) || undefined, date = text('time_hint', 40) || undefined;
       const chapter = args.chapter === undefined ? undefined : integer('chapter', 1, 1, 100000);
+      const sourceSession = text('source_session', 200) || undefined;
+      if (args.source_session !== undefined && !sourceSession) throw new Error('source_session must be a non-empty session ID');
       const label = args.target_label ?? 'Event';
       if (typeof label !== 'string' || !['Event', 'Person', 'Concept'].includes(label)) throw new Error('target_label must be Event, Person or Concept');
       if (chapter !== undefined && label !== 'Event') throw new Error('chapter filter is only supported for Event');
-      if (!query && !entity && !date && chapter === undefined) throw new Error('Provide query_text, entity_filter, time_hint or chapter');
+      if (sourceSession !== undefined && label !== 'Event') throw new Error('source_session filter is only supported for Event');
+      if (!query && !entity && !date && chapter === undefined && !sourceSession) throw new Error('Provide query_text, entity_filter, time_hint, chapter or source_session');
       if (date && !dateRange(date)) throw new Error('Invalid time_hint: use YYYY, YYYY-MM, YYYY-MM-DD or an inclusive A..B range');
       if (label === 'Event') {
         let vector: number[] | undefined;
         if (query) { this.config.requireModelKeys(false, true); await this.store.ensureIndexes(signal); vector = (await client.embed([query]))[0]; }
-        const filter = { entity, date, ...(chapter !== undefined ? { chapter } : {}) }, limit = EVIDENCE_LIMITS.events + EVIDENCE_LIMITS.relatedEvents;
+        const filter = { entity, date, ...(chapter !== undefined ? { chapter } : {}), ...(sourceSession ? { sourceSession } : {}) }, limit = EVIDENCE_LIMITS.events + EVIDENCE_LIMITS.relatedEvents;
         const candidates = await this.store.searchEvidence(vector, filter, signal, { query, exclude: delivered, limit });
         const fresh = candidates.filter(e => !delivered.includes(e.id));
         const events = sessionDiverse(fresh, EVIDENCE_LIMITS.events, this.config.sessionCap);

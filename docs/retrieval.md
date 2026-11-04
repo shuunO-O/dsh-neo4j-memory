@@ -10,11 +10,15 @@
 
 有问题向量时，分别从事件摘要和原文分块召回最多40个不同事件。原文路线取各事件中相似度最高的分块；候选在实体、写入日期和已交付ID过滤之后选取。两路排名通过RRF融合（k=60），再加问题词覆盖分，最后进行原文完全相同的事件去重与MMR多样性选择（lambda=0.75）。默认交付前8个事件的摘要与摘录，并附最多24个后续候选的`id | 摘要`索引；索引候选不占摘录预算，可用`read event_id=<id>`读取原文，也不进入追查游标。
 
-证据行在`id`后附带紧凑的来源标签：全文行是`[第53章 魔网]`（章节标题只出现在全文行），索引行只给`[第53章]`。事件没有章节元数据时不加标签。模型可见字段由`AGENT_EVENT_FIELDS`固定为`id / summary / quote / read / via / time / chapter / title`；`embedding*`、`raw_session`、`concept_alignment`、`source_scenes`、`EventSource.hash`等内部字段不会进入模型可见文本。
+证据行在`id`后附带紧凑的来源标签：全文行是`[第53章 魔网]`（章节标题只出现在全文行），索引行只给`[第53章]`。事件没有章节元数据时不加标签。全文行和候选索引在有来源会话时都显示`session="conversation-123"`，可将该值作为后续新搜索的`source_session`；没有来源会话时省略。模型可见字段由`AGENT_EVENT_FIELDS`固定为`id / summary / quote / read / via / time / chapter / title / session`；`embedding*`、`concept_alignment`、`source_scenes`、`EventSource.hash`等内部字段不会进入模型可见文本。存储字段`raw_session`只通过公开字段`session`返回。
 
 `search`还接受`chapter`作为事件级精确范围，与`time_hint`同级：只匹配`Event.chapter`，可与`query_text`/`entity_filter`/`time_hint`组合，不能用于Person/Concept。这样“第81章”是一个明确条件，而不是把章号塞进向量。
 
-没有问题向量的纯实体/日期检索按写入时间排序。
+`search`也接受`source_session`，精确匹配`Event.raw_session`，只支持Event。可以单独使用，也可以与`query_text`、`chapter`、`entity_filter`、`time_hint`组合，所有条件取交集。例如`{"operation":"search","source_session":"conversation-123","query_text":"部署进展"}`。`expand`/`nearby`沿用游标中的来源会话范围，后续操作不要重复传入或修改`source_session`。
+
+`source_session`是待检索记忆的来源会话；内部自动注入的`session_id`仍是当前调用会话，用于隔离游标和已交付记录，两者互不替代。来源会话ID可从搜索结果的`session`获得，当前不提供会话列表。
+
+没有问题向量的纯实体/日期/章节/来源会话检索按写入时间排序。
 
 当前在数据库中计算精确余弦、排序后只取每路40候选，支持筛选和排除已交付事件后补足候选；计算量随库中事件和原文分块数量增长。重排在本地完成，不调用额外的重排或规划模型。这些分数都是检索启发式，不是事实置信度。
 

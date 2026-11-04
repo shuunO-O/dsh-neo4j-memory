@@ -39,6 +39,43 @@ test('isolated Neo4j: layered evidence, actual global degree, source offsets and
   assert.equal(calls,1,'follow-up operations must not call the embedding model again');
 });
 
+test('isolated Neo4j: source session scopes filter search routes and graph/session continuations', {skip:process.env.DSH_NEO4J_MEMORY_INTEGRATION!=='1',timeout:180000},async t=>{
+  await mkdir(join(process.cwd(),'tmp'),{recursive:true});
+  const root=await mkdtemp(join(process.cwd(),'tmp','session-integration-')),runtime=new LocalNeo4j(root);let service;
+  t.after(async()=>{await service?.close();await runtime.stop();});const info=await runtime.ensure();
+  const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:info.password,embeddingApiKey:'fixture',embeddingDimensions:2},{DSH_NEO4J_MEMORY_NEO4J_URI:info.uri});
+  const http=createServer(async(req,res)=>{const chunks=[];for await(const c of req)chunks.push(c);const body=JSON.parse(Buffer.concat(chunks));
+    res.setHeader('content-type','application/json');res.end(JSON.stringify({data:body.input.map((_,index)=>({index,embedding:[1,0]}))}));});
+  await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));t.after(()=>{http.closeAllConnections();return new Promise(resolve=>http.close(resolve));});cfg.embeddingUrl=`http://127.0.0.1:${http.address().port}`;
+  service=new MemoryService(cfg);
+  const rows=['wanted','other'].flatMap(session=>Array.from({length:12},(_,i)=>({id:`${session}_${String(i+1).padStart(2,'0')}`,raw_session:session,chapter:81,
+    summary:`第${i+1}条部署计划`,content:`第${i+1}条部署计划尚未完成。`,create_time:`2026-11-04T10:00:${String(i+1).padStart(2,'0')}`,embedding:[1,0]})));
+  rows.push({...rows[0],id:'wrong_chapter',chapter:82},{...rows[0],id:'wrong_date',create_time:'2026-11-03T10:00:01'},
+    {...rows[0],id:'missing_session',raw_session:null});
+  await service.store.run('CREATE (:Concept {id:"concept_session",name:"部署",embedding:[1.0,0.0]})');
+  await service.store.run('UNWIND $rows AS row CREATE (e:Event) SET e=row WITH e MATCH (c:Concept {id:"concept_session"}) CREATE (e)-[:MENTIONS]->(c)',{rows});
+  const scope={source_session:'wanted',chapter:81,time_hint:'2026-11-04',entity_filter:'部署',session_id:'caller'};
+  const initial=await service.call('memory_database_search',scope);
+  assert.equal(initial.data.events.length,8);assert.equal(initial.data.related.length,4);
+  assert([...initial.data.events,...initial.data.related].every(e=>e.id.startsWith('wanted_')));
+  const nearby=await service.call('memory_database_search',{operation:'nearby',cursor:initial.data.cursor,event_id:'wanted_05',before:2,after:2,session_id:'caller'});
+  assert.deepEqual(nearby.data.events.map(e=>e.id),['wanted_03','wanted_04']);
+  const expanded=await service.call('memory_database_search',{operation:'expand',cursor:nearby.data.cursor,concept_id:'concept_session',session_id:'caller'});
+  assert.deepEqual(new Set(expanded.data.events.map(e=>e.id)),new Set(['wanted_01','wanted_02']));
+  const standalone=await service.call('memory_database_search',{source_session:'other',session_id:'standalone'});
+  assert.equal(standalone.data.events.length,8);assert(standalone.data.events.every(e=>e.id.startsWith('other_')));
+  const empty=await service.call('memory_database_search',{source_session:'absent'});assert.equal(empty.data.events.length,0);
+  await service.call('memory_database_reembed',{});
+  // Check each vector route separately, so fusion cannot hide an out-of-scope candidate.
+  const run=service.store.run.bind(service.store), routes=[];
+  service.store.run=async(q,p,s)=>{const result=await run(q,p,s);if(q.includes('evidence:summary-candidates')||q.includes('evidence:source-candidates'))routes.push(result);return result;};
+  const vector=await service.call('memory_database_search',{...scope,query_text:'部署计划',reset_seen:true});
+  assert.equal(routes.length,2);assert(routes.every(route=>route.length===12&&route.every(e=>e.id.startsWith('wanted_'))));
+  assert.equal(vector.data.events.length,8);
+  const vectorExpanded=await service.call('memory_database_search',{operation:'expand',cursor:vector.data.cursor,concept_id:'concept_session',session_id:'caller'});
+  assert.equal(vectorExpanded.data.events.length,3);assert(vectorExpanded.data.events.every(e=>e.id.startsWith('wanted_')));
+});
+
 test('isolated Neo4j: reembed builds atomic source chunks and content rescues a missing summary candidate', {skip:process.env.DSH_NEO4J_MEMORY_INTEGRATION!=='1',timeout:180000},async t=>{
   await mkdir(join(process.cwd(),'tmp'),{recursive:true});
   const root=await mkdtemp(join(process.cwd(),'tmp','hybrid-integration-')),runtime=new LocalNeo4j(root);let service;

@@ -8,6 +8,7 @@ export interface EvidenceFilter {
     entity?: string;
     date?: string;
     chapter?: number;
+    sourceSession?: string;
 }
 export interface EvidenceSearchOptions {
     query?: string;

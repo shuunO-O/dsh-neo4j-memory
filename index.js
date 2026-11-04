@@ -120,6 +120,7 @@ export function apply(ctx, config) {
       entity_filter: { type: 'string', description: 'Exact name or known alias of a connected entity.' },
       time_hint: { type: 'string', description: 'search: stored date scope for Event, hard filter on the date shown on each row. Accepts YYYY, YYYY-MM, YYYY-MM-DD or an inclusive A..B range; any trailing time is ignored. Not necessarily the event occurrence date.' },
       chapter: { type: 'number', description: 'search: exact chapter number (第81章 -> 81) when the memory stores chapter metadata; Event only. Acts as a hard scope and combines with query_text.' },
+      source_session: { type: 'string', description: 'search: exact source session ID, shown as session on returned events/candidate rows (stored as raw_session); Event only. Hard scope, usable alone or with query_text/chapter/time_hint/entity_filter. expand/nearby inherit it. Distinct from the current caller session; omit on follow-up operations.' },
       event_id: { type: 'string', description: 'Event ID as returned, without a type prefix. Used by read/nearby.' },
       concept_id: { type: 'string', description: 'Concept ID from the current continuation entries. Used by expand.' },
       cursor: { type: 'string', description: 'Continuation cursor returned by this session; valid for 15 minutes. Use the latest returned cursor to continue.' },

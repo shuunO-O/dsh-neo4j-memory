@@ -185,10 +185,12 @@ Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分�
 
 | operation | 参数 | 用途 |
 |---|---|---|
-| `search`（默认） | `query_text` / `entity_filter` / `time_hint` / `chapter` 至少一项 | 返回 8 个事件、原文、24 条候选索引和追查入口 |
+| `search`（默认） | `query_text` / `entity_filter` / `time_hint` / `chapter` / `source_session` 至少一项 | 返回 8 个事件、原文、24 条候选索引和追查入口 |
 | `read` | `event_id`，可选 `start` / `limit` | 按范围读取事件的 content；无需模型 Key |
 | `expand` | `cursor` / `concept_id`，可选 `limit` | 经返回的 Concept 补取事件，默认 3 个；只返回新增内容 |
 | `nearby` | `cursor` / `event_id`，可选 `before` / `after` | 有章号和导出记录号时，补读同章相邻编号；只返回新增内容 |
+
+按来源会话查询可传 `{"source_session":"conversation-123","query_text":"部署进展"}`，精确匹配 `Event.raw_session`；也可只传 `source_session`，无需模型 Key。它可与章节、实体、日期条件组合，`expand` / `nearby` 自动沿用这个范围。该参数与内部管理当前调用会话的 `session_id` 分开，来源会话 ID 可从事件和候选索引的 `session` 字段获得；没有来源会话时省略该字段。
 
 cursor 绑定当前会话，15 分钟内有效，重启后需重新检索；每条追查链累计最多 20 个事件。
 

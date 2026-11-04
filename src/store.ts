@@ -8,7 +8,7 @@ import { uniqueSourceMatches, type SourceMatch } from './source-search.js';
 import { randomUUID } from 'node:crypto';
 import { conceptGroups, conceptNameKey } from './concepts.js';
 
-export interface EvidenceFilter { entity?: string; date?: string; chapter?: number }
+export interface EvidenceFilter { entity?: string; date?: string; chapter?: number; sourceSession?: string }
 export interface EvidenceSearchOptions { query?: string; exclude?: string[]; limit?: number }
 const evidenceWhere = (alias: string) => `($entity IS NULL OR EXISTS { MATCH (${alias})-[]-(m) WHERE m.name=$entity OR $entity IN coalesce(m.aliases,[]) }
   OR EXISTS { MATCH (${alias})-[:MENTIONS]->(m:Concept), (named:Concept)
@@ -16,7 +16,8 @@ const evidenceWhere = (alias: string) => `($entity IS NULL OR EXISTS { MATCH (${
       AND coalesce(m.equivalence_group,m.id)=coalesce(named.equivalence_group,named.id) })
   AND ($date_start IS NULL OR ${alias}.create_time >= $date_start)
   AND ($date_end IS NULL OR ${alias}.create_time < $date_end)
-  AND ($chapter IS NULL OR ${alias}.chapter = $chapter)`;
+  AND ($chapter IS NULL OR ${alias}.chapter = $chapter)
+  AND ($source_session IS NULL OR ${alias}.raw_session = $source_session)`;
 const evidenceFields = (alias: string) => `${alias}.id AS id,coalesce(${alias}.summary,${alias}.name,${alias}.id) AS summary,
   ${alias}.chapter AS chapter,${alias}.chapter_title AS chapterTitle,${alias}.raw_session AS session,
   substring(coalesce(${alias}.content,''),0,$source_window) AS content,size(coalesce(${alias}.content,'')) AS contentLength,
@@ -25,7 +26,7 @@ const evidenceParams = (filter: EvidenceFilter, vector?: number[]) => {
   const range = filter.date ? dateRange(filter.date) : undefined;
   return {
     entity: filter.entity ?? null, entity_key: filter.entity ? conceptNameKey(filter.entity) : null, chapter: filter.chapter == null ? null : neo4j.int(filter.chapter),
-    date_start: range?.start ?? null, date_end: range?.end ?? null,
+    date_start: range?.start ?? null, date_end: range?.end ?? null, source_session: filter.sourceSession ?? null,
     vector: vector ?? null, source_window: neo4j.int(EVIDENCE_LIMITS.sourceWindow),
   };
 };
@@ -65,6 +66,7 @@ export class Neo4jStore {
       await this.run('CREATE CONSTRAINT memory_sequence_id IF NOT EXISTS FOR (c:MemorySequence) REQUIRE c.id IS UNIQUE', {}, signal);
       await this.run('CREATE CONSTRAINT memory_source_id IF NOT EXISTS FOR (s:EventSource) REQUIRE s.id IS UNIQUE', {}, signal);
       await this.run('CREATE INDEX event_chapter IF NOT EXISTS FOR (e:Event) ON (e.chapter)', {}, signal);
+      await this.run('CREATE INDEX event_source_session IF NOT EXISTS FOR (e:Event) ON (e.raw_session)', {}, signal);
       await this.run('CREATE INDEX concept_name_key IF NOT EXISTS FOR (c:Concept) ON (c.name_key)', {}, signal);
       await this.run('CREATE INDEX concept_equivalence_group IF NOT EXISTS FOR (c:Concept) ON (c.equivalence_group)', {}, signal);
       // Preserve legacy nodes and aliases: historical hard merges cannot be reconstructed.

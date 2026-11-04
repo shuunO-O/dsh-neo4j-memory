@@ -1,22 +1,22 @@
 /** Query evidence only: no model calls, inferred relations or database writes. */
 export const EVIDENCE_LIMITS = Object.freeze({ events: 8, relatedEvents: 24, expandedEvents: 20, conceptsPerEvent: 64, branches: 6, excerpt: 120, quoteBudget: 1000, sourceWindow: 32000, cursors: 32, cursorMs: 15 * 60_000 });
 /** The only fields allowed to cross from the store into the model-facing evidence. */
-export const AGENT_EVENT_FIELDS = Object.freeze(['id', 'summary', 'quote', 'read', 'via', 'time', 'chapter', 'title'] as const);
+export const AGENT_EVENT_FIELDS = Object.freeze(['id', 'summary', 'quote', 'read', 'via', 'time', 'chapter', 'title', 'session'] as const);
 export interface EvidenceEvent {
   id: string; summary: string; content: string; contentLength: number;
   matchedSource?: { range: [number, number]; text: string };
   occurrenceTime?: string | null; sourceKind?: 'graph' | 'nearby';
   chapter?: number; chapterTitle?: string;
-  /** Grouping key for orderable sibling records; never rendered to the model. */
+  /** Source session ID, also usable as the search source_session scope. */
   session?: string | null;
 }
 export interface EvidenceLink { eventId: string; conceptId: string; name: string; degree: number; score: number }
-export interface EvidenceRow { id: string; summary: string; quote?: { range: [number, number]; text: string }; quoteRef?: { id: string; range: [number, number] }; read?: { start: number; limit: number; total?: number }; source?: 'missing' | 'read'; via?: 'graph' | 'nearby'; time?: string; chapter?: number; title?: string }
+export interface EvidenceRow { id: string; summary: string; quote?: { range: [number, number]; text: string }; quoteRef?: { id: string; range: [number, number] }; read?: { start: number; limit: number; total?: number }; source?: 'missing' | 'read'; via?: 'graph' | 'nearby'; time?: string; chapter?: number; title?: string; session?: string }
 export interface EvidenceResult {
   kind: 'evidence'; cursor?: string; scope: 'initial' | 'added'; seen: number;
   events: EvidenceRow[];
   /** One-line index of further candidates: visible to the model without paying for full text. */
-  related?: { id: string; summary: string; chapter?: number }[];
+  related?: { id: string; summary: string; chapter?: number; session?: string }[];
   shared: { concept: string; events: string[]; degree: number }[];
   next: { concepts: { id: string; name: string; from: string; remaining: number }[]; nearby: string[] };
   limited?: string[];
@@ -109,10 +109,11 @@ export function sourcePosition(id: string): { prefix: string; record: number } |
   return match ? { prefix: match[1], record: Number(match[2]) } : undefined;
 }
 /** Compact provenance: chapter is stable, title is shown only on full rows. */
-function provenance(e: EvidenceEvent): { chapter?: number; title?: string } {
+function provenance(e: EvidenceEvent): { chapter?: number; title?: string; session?: string } {
   const chapter = Number.isInteger(e.chapter) && e.chapter! > 0 ? e.chapter : undefined;
   const title = chapter && typeof e.chapterTitle === 'string' && e.chapterTitle.trim() ? e.chapterTitle.trim() : undefined;
-  return { ...(chapter ? { chapter } : {}), ...(title ? { title } : {}) };
+  const session = typeof e.session === 'string' && e.session.trim() ? e.session : undefined;
+  return { ...(chapter ? { chapter } : {}), ...(title ? { title } : {}), ...(session ? { session } : {}) };
 }
 export function buildEvidence(events: EvidenceEvent[], links: EvidenceLink[], allIds: string[], query: string, scope: EvidenceResult['scope'], limited: string[] = [], related: EvidenceEvent[] = []): EvidenceResult {
   const seen = new Set(allIds), added = new Set(events.map(e => e.id)); let budget: number = EVIDENCE_LIMITS.quoteBudget;
@@ -143,7 +144,10 @@ export function buildEvidence(events: EvidenceEvent[], links: EvidenceLink[], al
   const concepts = [...grouped].filter(([, g]) => g.degree > g.events.size).map(([id, g]) => ({ id, name: g.name, from: [...g.events][0], remaining: g.degree - g.events.size, priority: .6 * Math.max(0, g.score) + .4 / Math.log2(2 + g.degree) }))
     .sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id)).slice(0, EVIDENCE_LIMITS.branches).map(({ priority, ...c }) => c);
   const ordered = new Set(events.filter(e => e.session || sourcePosition(e.id)).map(e => e.id));
-  return { kind: 'evidence', scope, seen: allIds.length, events: rows, related: related.map(e => ({ id: e.id, summary: e.summary, ...(e.chapter ? { chapter: e.chapter } : {}) })), shared, next: { concepts, nearby: allIds.filter(id => ordered.has(id) || sourcePosition(id)) }, ...(limited.length ? { limited } : {}) };
+  return { kind: 'evidence', scope, seen: allIds.length, events: rows, related: related.map(e => {
+    const { chapter, session } = provenance(e);
+    return { id: e.id, summary: e.summary, ...(chapter ? { chapter } : {}), ...(session ? { session } : {}) };
+  }), shared, next: { concepts, nearby: allIds.filter(id => ordered.has(id) || sourcePosition(id)) }, ...(limited.length ? { limited } : {}) };
 }
 export function renderMemoryEvidence(data: EvidenceResult | SourceResult | import('./source-search.js').SourceMatches): string {
   if (data.kind === 'source_matches') return `${data.id} 原文共${data.total}字符；事件内检索，${data.ranking}相关性分数不代表置信概率。候选${data.candidates}块。\n` +
@@ -152,7 +156,7 @@ export function renderMemoryEvidence(data: EvidenceResult | SourceResult | impor
   const lines = ['摘要待核；原文范围[起点:终点)按Unicode字符计。共享概念及来源邻近不代表因果或发生顺序。', `${data.scope === 'added' ? '本次新增' : '事件'}${data.events.length}条，累计${data.seen}条。`];
   const quoteRefs = new Map<string, string>();
   for (const e of data.events) {
-    lines.push(`${e.id}${e.chapter ? ` [第${e.chapter}章${e.title ? ` ${e.title}` : ''}]` : ''}${e.via ? ` [${e.via === 'graph' ? '沿图补充' : '来源补读'}]` : ''}${e.time ? ` 时间=${e.time}` : ''} | ${e.summary}`);
+    lines.push(`${e.id}${e.chapter ? ` [第${e.chapter}章${e.title ? ` ${e.title}` : ''}]` : ''}${e.session ? ` session=${JSON.stringify(e.session)}` : ''}${e.via ? ` [${e.via === 'graph' ? '沿图补充' : '来源补读'}]` : ''}${e.time ? ` 时间=${e.time}` : ''} | ${e.summary}`);
     if (e.quoteRef) lines.push(`原文同 ${e.quoteRef.id} 原文[${e.quoteRef.range.join(':')}]（此前已交付）`);
     else if (e.quote) {
       const prior = quoteRefs.get(e.quote.text);
@@ -163,7 +167,7 @@ export function renderMemoryEvidence(data: EvidenceResult | SourceResult | impor
   }
   if (data.related?.length) {
     lines.push(`其它候选（未展开全文，${data.related.length}条；operation=read event_id=<id> 可读取）：`);
-    for (const e of data.related) lines.push(`${e.id}${e.chapter ? ` [第${e.chapter}章]` : ''} | ${[...e.summary].slice(0, 100).join('')}`);
+    for (const e of data.related) lines.push(`${e.id}${e.chapter ? ` [第${e.chapter}章]` : ''}${e.session ? ` session=${JSON.stringify(e.session)}` : ''} | ${[...e.summary].slice(0, 100).join('')}`);
   }
   if (data.shared.length) lines.push('共享概念：', ...data.shared.map(g => `${g.concept}（全库${g.degree}条）：${g.events.join(',')}`));
   if (data.cursor) {
