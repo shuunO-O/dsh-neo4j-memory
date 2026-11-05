@@ -56,7 +56,7 @@ test('isolated Neo4j: source session scopes filter search routes and graph/sessi
   await service.store.run('UNWIND $rows AS row CREATE (e:Event) SET e=row WITH e MATCH (c:Concept {id:"concept_session"}) CREATE (e)-[:MENTIONS]->(c)',{rows});
   const scope={source_session:'wanted',chapter:81,time_hint:'2026-11-04',entity_filter:'部署',session_id:'caller'};
   const initial=await service.call('memory_database_search',scope);
-  assert.equal(initial.data.events.length,8);assert.equal(initial.data.related.length,4);
+  assert.equal(initial.data.events.length,8);assert.equal(initial.data.related.length,0);
   assert([...initial.data.events,...initial.data.related].every(e=>e.id.startsWith('wanted_')));
   const nearby=await service.call('memory_database_search',{operation:'nearby',cursor:initial.data.cursor,event_id:'wanted_05',before:2,after:2,session_id:'caller'});
   assert.deepEqual(nearby.data.events.map(e=>e.id),['wanted_03','wanted_04']);

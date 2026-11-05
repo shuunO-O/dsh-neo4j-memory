@@ -1,5 +1,5 @@
 /** Query evidence only: no model calls, inferred relations or database writes. */
-export const EVIDENCE_LIMITS = Object.freeze({ events: 8, relatedEvents: 24, expandedEvents: 20, conceptsPerEvent: 64, branches: 6, excerpt: 120, quoteBudget: 1000, sourceWindow: 32000, cursors: 32, cursorMs: 15 * 60_000 });
+export const EVIDENCE_LIMITS = Object.freeze({ events: 8, relatedEvents: 0, candidateEvents: 32, expandedEvents: 20, conceptsPerEvent: 64, branches: 6, excerpt: 120, quoteBudget: 1000, sourceWindow: 32000, cursors: 32, cursorMs: 15 * 60_000 });
 /** The only fields allowed to cross from the store into the model-facing evidence. */
 export const AGENT_EVENT_FIELDS = Object.freeze(['id', 'summary', 'quote', 'read', 'via', 'time', 'chapter', 'title', 'session'] as const);
 export interface EvidenceEvent {

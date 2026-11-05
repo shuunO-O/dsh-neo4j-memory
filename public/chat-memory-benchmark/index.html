@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="六人物记忆基准测试的最终成绩、费用和逐题对照。">
+  <title>六人物记忆测试 · 最终结果</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="data.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+<header><div class="wrap"><p class="eyebrow">MEMORY BENCHMARK / 2026.11.05</p><h1>记住之后，<br><em>回答得怎样？</em></h1><p class="intro">六人物正式测试集 · 1024 维记忆系统<br>最终测试结果，以及每一道题的回答与依据。</p><a class="jump" href="#questions">查看逐题对照 <span>↘</span></a></div></header>
+<main class="wrap">
+  <section class="summary" aria-label="测试结果">
+    <article><span>抽查修正后通过率</span><strong>96.08<small>%</small></strong><p>686 / 714 题</p></article>
+    <article><span>处理 + 检索 + 作答</span><strong>¥7.35</strong><p>处理 ¥1.97 · 检索 ¥0.02 · 作答 ¥5.36</p></article>
+    <article class="qualifier"><span>阅读说明</span><p>已人工复核 26 题，其余使用模型判分。成绩为抽查修正后的暂定结果，并非全量人工复核。</p><p>费用按已记录用量估算，DeepSeek 按谷价计算，不含判分费用。</p></article>
+  </section>
+  <section class="method"><div><p class="eyebrow">THE DATASET</p><h2>测试集从哪里来</h2></div><div><p>使用 <a href="https://github.com/Ornn8/chat-memory-benchmark">chat-memory-benchmark</a> 的 <a href="https://github.com/Ornn8/chat-memory-benchmark/tree/c5653e09870da87df22e28bf599f77a2a0d0eb73/datasets/natural-timegrid-20261101-v2">natural-timegrid-20261101-v2 六人物正式集</a>：6 个人物的合成对话历史、714 道带历史截止点的题目及评分要点。测试使用原仓库提交 <code>c5653e0</code>。</p><p class="details">评分按题目要求判断整题是否通过；已人工复核 26 题，其余沿用 DeepSeek 模型判分。判分时可以读取该题截止前的历史。</p></div></section>
+  <section class="method"><div><p class="eyebrow">THE MEMORY PIPELINE</p><h2>历史如何入库</h2></div><div><p>每个人物使用独立的 Neo4j 数据库，按时间顺序回放对话。同一自然日内的多轮用户和助手消息合并为一批，用 Qwen3.8 Flash 一起抽取事件、实体和关系；遇到题目的历史截止点就拆批，抽取失败时也可能拆成更小批次重试。</p><p>每批抽取结果经 Qwen3.7 Text Embedding 生成 1024 维向量并写入记忆。本轮六个人物共处理 <strong>2,240 轮、851 批</strong>；考试题目和答案不写入记忆。</p><p class="details">作答时只额外提供最近六轮，由 DeepSeek V4.1 Flash 高思考模式自主检索；每题最多 6 次工具调用，每次最多 10,976 字符，不交付额外候选。完整历史和标准答案不会交给作答模型。</p></div></section>
+  <section id="questions" class="questions"><div class="section-title"><div><p class="eyebrow">QUESTION BY QUESTION</p><h2>逐题对照</h2></div><p>对照问题、评分要点与实际回答。<br>人工复核题会单独标注。</p></div>
+    <div class="controls"><label><span>搜索</span><input id="search" type="search" placeholder="题号、人物、问题或回答"></label><label><span>结果</span><select id="status"><option value="all">全部结果</option><option value="pass">通过</option><option value="fail">未通过</option><option value="reviewed">人工复核</option></select></label><label><span>人物</span><select id="persona"><option value="all">全部人物</option><option>P01</option><option>P12</option><option>P14</option><option>P16</option><option>P17</option><option>P20</option></select></label></div>
+    <div class="list-header"><span id="count" aria-live="polite"></span><span>点击题目展开</span></div><div id="list"></div><div class="pagination"><button id="prev" type="button">← 上一页</button><span id="page" aria-live="polite"></span><button id="next" type="button">下一页 →</button></div>
+  </section>
+</main><footer class="wrap">数据来自 <a href="https://github.com/Ornn8/chat-memory-benchmark">chat-memory-benchmark</a> 六人物正式集；测试与判分配置保留在本页。 <a href="LICENSE-benchmark">原仓库许可证</a></footer>
+<noscript>逐题对照需要启用 JavaScript。</noscript>
+</body></html>

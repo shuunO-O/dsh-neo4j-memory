@@ -5,7 +5,7 @@
 只向模型提供两个工具：
 
 - `memory_database_save(content)`：提取事件、人物、概念、地点和关系，写入 Neo4j。
-- `memory_database_search(...)`：摘要与原文两路混合检索（RRF 融合 + MMR 去冗），默认返回 8 个事件的紧凑证据并附最多 24 条候选索引；支持读取原文、沿概念继续检索和补读来源附近记录。
+- `memory_database_search(...)`：摘要与原文两路混合检索（RRF 融合 + MMR 去冗），默认返回 8 个事件的紧凑证据，不附额外候选索引；支持读取原文、沿概念继续检索和补读来源附近记录。
 
 记忆按“事件 + 实体 + 关系”组织，不是聊天记录切片。只有显式调用保存工具的内容才会被写入；插件不扫描聊天记录。
 
@@ -20,6 +20,12 @@
 - 写入是一个 Neo4j 事务，失败回滚
 - Key、端点、模型、阈值、维度保存后下一次调用生效
 - 节点 ID 按类型自增：`event_1`、`person_2`、`concept_3`……
+
+## 测试结果
+
+在 [chat-memory-benchmark](https://github.com/Ornn8/chat-memory-benchmark) 六人物正式测试集上，完成 714 道题；抽查修正后暂为 **686 / 714（96.08%）**。其中 26 题经过人工复核，其余使用模型判分，不能视为全量人工复核结果。
+
+本轮按人物和自然日合并历史入库，使用 1024 维向量；作答时提供最近六轮，由模型自主检索。处理、检索和作答按记录用量估算约 **¥7.35**，不含判分费用。详细配置、题目、实际回答和判分依据见 [公开测试报告](public/chat-memory-benchmark/index.html)及 [JSON 数据](public/chat-memory-benchmark/results.json)。
 
 ## 效果
 
@@ -174,23 +180,23 @@ Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分�
 1. **两路候选**：问题向量分别检索事件摘要与原文分块，各取前 40，合并后最多 80 个不同候选；候选先按实体、写入日期和已交付 ID 过滤。
 2. **融合重排**：两路名次用 RRF 融合（`k = 60`），再加查询词项覆盖 `0.10`。
 3. **控制冗余**：完整原文相同的事件只保留一个代表；MMR 在相关性与已选证据的相似度之间折中（`λ = 0.75`，冗余取向量余弦与来源分块重叠的较大值）。
-4. **分层交付**：前 8 个事件给摘要 + 最多 120 字符的原文摘录（整包预算 1,000 字符），其余最多 24 个候选只给 `id | 摘要` 索引，不占摘录预算，可用 `read` 按需展开；追查链剩余额度不足时按余额交付，失败的调用不占用名额。
+4. **分层交付**：前 8 个事件给摘要 + 最多 120 字符的原文摘录（整包预算 1,000 字符），默认不交付额外候选索引；追查链剩余额度不足时按余额交付，失败的调用不占用名额。
 5. **按需核对**：模型再用 `read` / `nearby` / `expand` 补读原文、同章邻近记录或经共享 Concept 扩展。
 
 接口与升级细节见[检索接口](docs/retrieval.md)，混合检索与纯向量检索的逐题对照见 [public/dawn-retrieval-study](public/dawn-retrieval-study/README.md)。
 
 ### 检索和继续追查
 
-首次调用方式不变，例如 `{"query_text":"Neo4j 的部署方式和方案演进"}`。默认 `target_label=Event`，每次返回 8 个事件的摘要与原文摘录（每个事件最多 120 个字符，全包预算 1,000 字符），并附最多 24 条候选索引和每条事件的 `read event_id=<id> limit=<原文长度>`；可用 `chapter`（如“第81章”传 81）把检索硬限定到某一章，完整来源按需读取。模型看到紧凑结构化文字。
+首次调用方式不变，例如 `{"query_text":"Neo4j 的部署方式和方案演进"}`。默认 `target_label=Event`，每次返回 8 个事件的摘要与原文摘录（每个事件最多 120 个字符，全包预算 1,000 字符），并提供每条事件的 `read event_id=<id> limit=<原文长度>`；可用 `chapter`（如“第81章”传 81）把检索硬限定到某一章，完整来源按需读取。模型看到紧凑结构化文字。
 
 | operation | 参数 | 用途 |
 |---|---|---|
-| `search`（默认） | `query_text` / `entity_filter` / `time_hint` / `chapter` / `source_session` 至少一项 | 返回 8 个事件、原文、24 条候选索引和追查入口 |
+| `search`（默认） | `query_text` / `entity_filter` / `time_hint` / `chapter` / `source_session` 至少一项 | 返回最多 8 个事件的摘要、原文摘录和追查入口 |
 | `read` | `event_id`，可选 `start` / `limit` | 按范围读取事件的 content；无需模型 Key |
 | `expand` | `cursor` / `concept_id`，可选 `limit` | 经返回的 Concept 补取事件，默认 3 个；只返回新增内容 |
 | `nearby` | `cursor` / `event_id`，可选 `before` / `after` | 有章号和导出记录号时，补读同章相邻编号；只返回新增内容 |
 
-按来源会话查询可传 `{"source_session":"conversation-123","query_text":"部署进展"}`，精确匹配 `Event.raw_session`；也可只传 `source_session`，无需模型 Key。它可与章节、实体、日期条件组合，`expand` / `nearby` 自动沿用这个范围。该参数与内部管理当前调用会话的 `session_id` 分开，来源会话 ID 可从事件和候选索引的 `session` 字段获得；没有来源会话时省略该字段。
+按来源会话查询可传 `{"source_session":"conversation-123","query_text":"部署进展"}`，精确匹配 `Event.raw_session`；也可只传 `source_session`，无需模型 Key。它可与章节、实体、日期条件组合，`expand` / `nearby` 自动沿用这个范围。该参数与内部管理当前调用会话的 `session_id` 分开，来源会话 ID 可从事件的 `session` 字段获得；没有来源会话时省略该字段。
 
 cursor 绑定当前会话，15 分钟内有效，重启后需重新检索；每条追查链累计最多 20 个事件。
 
@@ -201,7 +207,7 @@ cursor 绑定当前会话，15 分钟内有效，重启后需重新检索；每�
 - 提取与合并较粗：仅单次抽取；概念按名称/别名 + 向量 + 两两判同，不保证一定准确。
 - 初始事件召回依赖摘要与原文分块向量；旧记忆没有原文分块时只能靠摘要命中。沿概念扩展不能补回数据库里缺失的关系，也不保证关键事实完整。
 - 图谱只读：没有删除、合并、编辑节点/关系的 UI。
-- `0.7.0`，没有完整 benchmark；唯一的对照实验见 [public/dawn-retrieval-study](public/dawn-retrieval-study/README.md)，只覆盖《黎明之剑》前 500 章、18 道开发题与 6 道新题，不覆盖其他记忆场景；仅在 Windows x64 上测试过。
+- 测试覆盖范围有限：六人物成绩包含模型判分，仍可能存在误判；[小说检索对照](public/dawn-retrieval-study/README.md)只覆盖《黎明之剑》前 500 章、18 道开发题与 6 道新题。插件仅在 Windows x64 上测试过。
 
 ## 开发
 

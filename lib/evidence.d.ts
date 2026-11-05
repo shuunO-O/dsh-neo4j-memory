@@ -1,7 +1,8 @@
 /** Query evidence only: no model calls, inferred relations or database writes. */
 export declare const EVIDENCE_LIMITS: Readonly<{
     events: 8;
-    relatedEvents: 24;
+    relatedEvents: 0;
+    candidateEvents: 32;
     expandedEvents: 20;
     conceptsPerEvent: 64;
     branches: 6;

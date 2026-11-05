@@ -72,11 +72,11 @@ test('delivery is serialized per owner, caps all responses, shares quote referen
   assert.equal(a.data.events.length, 8); assert.equal(b.data.events.length, 8);
   assert.deepEqual(a.data.events.map(e => e.id), rows.slice(0,8).map(e=>e.id));
   assert.deepEqual(b.data.events.map(e => e.id), rows.slice(8,16).map(e=>e.id));
-  assert.deepEqual(a.data.related.map(e => e.id), rows.slice(8,24).map(e=>e.id));
+  assert.deepEqual(a.data.related, []);
   assert(b.data.events.every(e => e.quoteRef?.id === rows[0].id));
   assert(renderMemoryEvidence(b.data).includes('此前已交付'));
-  assert(renderMemoryEvidence(a.data).includes('其它候选'));
-  assert(renderMemoryEvidence(a.data).includes(rows[16].id));
+  assert(!renderMemoryEvidence(a.data).includes('其它候选'));
+  assert(!renderMemoryEvidence(a.data).includes(rows[16].id));
   const other = await service.call('memory_database_search', {entity_filter:'甲',session_id:'other'});
   assert.equal(other.data.events[0].id, rows[0].id);
   const reset = await service.call('memory_database_search', {entity_filter:'甲',reset_seen:true});

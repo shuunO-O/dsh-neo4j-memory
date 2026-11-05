@@ -212,7 +212,7 @@ export class MemoryService {
       if (label === 'Event') {
         let vector: number[] | undefined;
         if (query) { this.config.requireModelKeys(false, true); await this.store.ensureIndexes(signal); vector = (await client.embed([query]))[0]; }
-        const filter = { entity, date, ...(chapter !== undefined ? { chapter } : {}), ...(sourceSession ? { sourceSession } : {}) }, limit = EVIDENCE_LIMITS.events + EVIDENCE_LIMITS.relatedEvents;
+        const filter = { entity, date, ...(chapter !== undefined ? { chapter } : {}), ...(sourceSession ? { sourceSession } : {}) }, limit = EVIDENCE_LIMITS.candidateEvents;
         const candidates = await this.store.searchEvidence(vector, filter, signal, { query, exclude: delivered, limit });
         const fresh = candidates.filter(e => !delivered.includes(e.id));
         const events = sessionDiverse(fresh, EVIDENCE_LIMITS.events, this.config.sessionCap);

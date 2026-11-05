@@ -8,9 +8,9 @@
 {"query_text":"Neo4j 的部署方式和方案演进"}
 ```
 
-有问题向量时，分别从事件摘要和原文分块召回最多40个不同事件。原文路线取各事件中相似度最高的分块；候选在实体、写入日期和已交付ID过滤之后选取。两路排名通过RRF融合（k=60），再加问题词覆盖分，最后进行原文完全相同的事件去重与MMR多样性选择（lambda=0.75）。默认交付前8个事件的摘要与摘录，并附最多24个后续候选的`id | 摘要`索引；索引候选不占摘录预算，可用`read event_id=<id>`读取原文，也不进入追查游标。
+有问题向量时，分别从事件摘要和原文分块召回最多40个不同事件。原文路线取各事件中相似度最高的分块；候选在实体、写入日期和已交付ID过滤之后选取。两路排名通过RRF融合（k=60），再加问题词覆盖分，最后进行原文完全相同的事件去重与MMR多样性选择（lambda=0.75）。默认交付前8个事件的摘要与摘录，默认不附额外候选索引；已交付的事件可用`read event_id=<id>`读取原文。
 
-证据行在`id`后附带紧凑的来源标签：全文行是`[第53章 魔网]`（章节标题只出现在全文行），索引行只给`[第53章]`。事件没有章节元数据时不加标签。全文行和候选索引在有来源会话时都显示`session="conversation-123"`，可将该值作为后续新搜索的`source_session`；没有来源会话时省略。模型可见字段由`AGENT_EVENT_FIELDS`固定为`id / summary / quote / read / via / time / chapter / title / session`；`embedding*`、`concept_alignment`、`source_scenes`、`EventSource.hash`等内部字段不会进入模型可见文本。存储字段`raw_session`只通过公开字段`session`返回。
+证据行在`id`后附带紧凑的来源标签：全文行是`[第53章 魔网]`（章节标题只出现在全文行），索引行只给`[第53章]`。事件没有章节元数据时不加标签。全文行在有来源会话时显示`session="conversation-123"`，可将该值作为后续新搜索的`source_session`；没有来源会话时省略。模型可见字段由`AGENT_EVENT_FIELDS`固定为`id / summary / quote / read / via / time / chapter / title / session`；`embedding*`、`concept_alignment`、`source_scenes`、`EventSource.hash`等内部字段不会进入模型可见文本。存储字段`raw_session`只通过公开字段`session`返回。
 
 `search`还接受`chapter`作为事件级精确范围，与`time_hint`同级：只匹配`Event.chapter`，可与`query_text`/`entity_filter`/`time_hint`组合，不能用于Person/Concept。这样“第81章”是一个明确条件，而不是把章号塞进向量。
 
@@ -92,4 +92,3 @@ node --test --test-concurrency=1 tests/evidence-integration.test.mjs tests/integ
 设置 `DSH_NEO4J_MEMORY_SOURCE_RERANK_URL` 为阿里云兼容重排完整端点（如 `https://dashscope.aliyuncs.com/compatible-api/v1/reranks`），即可对这些候选块进行云端重排；模型变量 `DSH_NEO4J_MEMORY_SOURCE_RERANK_MODEL` 默认 `qwen3-rerank`，密钥 `DSH_NEO4J_MEMORY_SOURCE_RERANK_API_KEY` 未设置时复用 embedding key。未配置端点时按向量分数排序。原文不重新抽取或向量化；每次语义 read 会产生问题 embedding 费用，启用重排时另有重排费用。
 
 可选 `min_score` 按当前排序模型的相关性分数过滤，再取前 K；不默认设未经校准的阈值。返回 `ranking`、向量分数和最终分数以供检查。相关性分数不是置信概率；没有达标片段不等于原文不存在答案。缺少兼容的原文向量会明确报错，可重新向量化补齐，不会默默退回原文开头。
-
