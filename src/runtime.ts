@@ -2,7 +2,7 @@ import { spawn, execFile, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomBytes } from 'node:crypto';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile, rename, readdir, rm, stat, appendFile, open } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, readdir, realpath, rm, stat, appendFile, open } from 'node:fs/promises';
 import { join, resolve, dirname, sep, isAbsolute } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -16,14 +16,43 @@ import neo4j from 'neo4j-driver';
 
 const exec = promisify(execFile);
 export const NEO4J_VERSION = '5.26.30', JRE_VERSION = '21.0.12.1+1';
-const artifacts = {
-  neo4j: ['https://dist.neo4j.org/neo4j-community-5.26.30-windows.zip', 'b2c2932b16f810adcc54560e90ee35847047d2d52f78cfbfabbae133be8f82cd'],
-  jre: ['https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_windows_hotspot_21.0.12.1_1.zip', 'd35f31e712f0fcf6ac5a093edc90204fbff22f720ba3950bd09d331d5e621636'],
+export type ArchiveKind = 'zip' | 'tar.gz';
+export interface RuntimeArtifact { version: string; url: string; sha256: string; archive: ArchiveKind }
+export interface RuntimeArtifacts { neo4j: RuntimeArtifact; jre: RuntimeArtifact }
+// Archives are pinned per platform; Windows entries keep their published checksums.
+const artifacts: Record<string, RuntimeArtifacts> = {
+  'win32-x64': {
+    neo4j: { version: NEO4J_VERSION, archive: 'zip', url: 'https://dist.neo4j.org/neo4j-community-5.26.30-windows.zip', sha256: 'b2c2932b16f810adcc54560e90ee35847047d2d52f78cfbfabbae133be8f82cd' },
+    jre: { version: JRE_VERSION, archive: 'zip', url: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_windows_hotspot_21.0.12.1_1.zip', sha256: 'd35f31e712f0fcf6ac5a093edc90204fbff22f720ba3950bd09d331d5e621636' },
+  },
+  'linux-x64': {
+    neo4j: { version: NEO4J_VERSION, archive: 'tar.gz', url: 'https://dist.neo4j.org/neo4j-community-5.26.30-unix.tar.gz', sha256: 'f22934e3f7c1ddae743d91243f38aa492f007471c6a2bdbdc882fe2b3e1e4bdd' },
+    jre: { version: JRE_VERSION, archive: 'tar.gz', url: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_linux_hotspot_21.0.12.1_1.tar.gz', sha256: '2413149700df0f7d440500a84a8f764c535f21e5a5e87d38328b64eec2c5b500' },
+  },
 };
+export function runtimeTarget(): string { return `${process.platform}-${process.arch}`; }
+/** Artifacts for a platform; URL and checksum may be overridden for mirrors or offline provisioning. */
+export function runtimeArtifacts(target = runtimeTarget(), env = process.env): RuntimeArtifacts | undefined {
+  const base = artifacts[target];
+  if (!base) return undefined;
+  const override = (artifact: RuntimeArtifact, prefix: string): RuntimeArtifact => ({
+    ...artifact,
+    url: env[`${prefix}_URL`]?.trim() || artifact.url,
+    sha256: (env[`${prefix}_SHA256`]?.trim() || artifact.sha256).toLowerCase(),
+  });
+  return { neo4j: override(base.neo4j, 'DSH_NEO4J_MEMORY_NEO4J_ARCHIVE'), jre: override(base.jre, 'DSH_NEO4J_MEMORY_JRE_ARCHIVE') };
+}
 export class RuntimeUnavailable extends Error {}
 export interface RuntimeInfo { uri: string; user: string; password: string; port: number; home: string }
+export function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error: any) { return error.code === 'EPERM'; }
+}
 export function defaultDataRoot(): string {
-  return resolve(process.env.DSH_NEO4J_MEMORY_RUNTIME_DIR || process.env.DSH_NEO4J_MEMORY_DATA_DIR || join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'dsh-neo4j-memory'));
+  const configured = process.env.DSH_NEO4J_MEMORY_RUNTIME_DIR || process.env.DSH_NEO4J_MEMORY_DATA_DIR;
+  if (configured) return resolve(configured);
+  if (process.platform === 'win32') return resolve(join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'dsh-neo4j-memory'));
+  return resolve(join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'dsh-neo4j-memory'));
 }
 async function digest(path: string): Promise<string> {
   const hash = createHash('sha256'); for await (const chunk of createReadStream(path)) hash.update(chunk); return hash.digest('hex');
@@ -40,6 +69,16 @@ export function guardArchivePath(root: string, name: string): string {
   const target = resolve(root, normalized);
   if (isAbsolute(normalized) || /^[a-z]:/i.test(normalized) || normalized.split('/').includes('..') || normalized.includes(':') || !target.startsWith(resolve(root) + sep)) throw new RuntimeUnavailable('Archive contains an unsafe path');
   return target;
+}
+async function commitStaging(staging: string, destination: string): Promise<void> {
+  const children = await readdir(staging, { withFileTypes: true });
+  const source = children.length === 1 && children[0].isDirectory() ? join(staging, children[0].name) : staging;
+  // Refuse to replace an existing installation: it may contain user files.
+  if (existsSync(destination)) throw new RuntimeUnavailable(`Incomplete runtime at ${destination}; move it aside before retrying`);
+  await mkdir(dirname(destination), { recursive: true }); await rename(source, destination);
+}
+async function removeStaging(staging: string, archive: string): Promise<void> {
+  if (resolve(staging).startsWith(resolve(dirname(archive)) + sep) && /^unpack-[0-9a-f]+$/.test(staging.split(sep).at(-1)!)) await rm(staging, { recursive: true, force: true });
 }
 export async function extractZip(archive: string, destination: string): Promise<void> {
   const staging = join(dirname(archive), `unpack-${randomBytes(8).toString('hex')}`);
@@ -64,14 +103,45 @@ export async function extractZip(archive: string, destination: string): Promise<
         zip.readEntry();
       });
     });
-    const children = await readdir(staging, { withFileTypes: true });
-    const source = children.length === 1 && children[0].isDirectory() ? join(staging, children[0].name) : staging;
-    // Refuse to replace an existing installation: it may contain user files.
-    if (existsSync(destination)) throw new RuntimeUnavailable(`Incomplete runtime at ${destination}; move it aside before retrying`);
-    await mkdir(dirname(destination), { recursive: true }); await rename(source, destination);
-  } finally {
-    if (resolve(staging).startsWith(resolve(dirname(archive)) + sep) && /^unpack-[0-9a-f]+$/.test(staging.split(sep).at(-1)!)) await rm(staging, { recursive: true, force: true });
+    await commitStaging(staging, destination);
+  } finally { await removeStaging(staging, archive); }
+}
+/**
+ * Extract a .tar.gz with the system tar. Members are listed and validated before extraction;
+ * links and special files are refused so staged content cannot escape the staging tree.
+ */
+export async function extractTarGz(archive: string, destination: string): Promise<void> {
+  const staging = join(dirname(archive), `unpack-${randomBytes(8).toString('hex')}`);
+  await mkdir(staging, { recursive: true });
+  try {
+    await validateTar(archive, staging);
+    try { await exec('tar', ['-xzf', archive, '-C', staging], { timeout: 600_000, windowsHide: true }); }
+    catch (error: any) { throw new RuntimeUnavailable(`Cannot extract the archive: ${String(error.stderr || error.code || error.message).trim().slice(-500)}`); }
+    if (!(await readdir(staging)).length) throw new RuntimeUnavailable('Archive extracted no files');
+    await commitStaging(staging, destination);
+  } finally { await removeStaging(staging, archive); }
+}
+async function validateTar(archive: string, root: string): Promise<void> {
+  const options = { timeout: 300_000, maxBuffer: 64 * 1024 * 1024, windowsHide: true };
+  let names: string[];
+  try {
+    const listing = await exec('tar', ['-tzf', archive], options);
+    names = listing.stdout.split('\n').filter(name => name.length > 0);
+  } catch (error: any) {
+    throw new RuntimeUnavailable(`Cannot read the archive with tar: ${String(error.stderr || error.code || error.message).trim().slice(-500)}`);
   }
+  if (!names.length) throw new RuntimeUnavailable('Archive is empty');
+  for (const name of names) guardArchivePath(root, name);
+  const verbose = (await exec('tar', ['-tvzf', archive], options)).stdout.split('\n').filter(line => line.length > 0);
+  if (verbose.length !== names.length) throw new RuntimeUnavailable('Archive listing is inconsistent');
+  for (const line of verbose) {
+    const kind = line[0];
+    if (kind === 'l' || kind === 'h') throw new RuntimeUnavailable('Archive contains a symbolic or hard link');
+    if (kind !== '-' && kind !== 'd') throw new RuntimeUnavailable('Archive contains an unsupported entry');
+  }
+}
+export async function extractArchive(kind: ArchiveKind, archive: string, destination: string): Promise<void> {
+  return kind === 'zip' ? extractZip(archive, destination) : extractTarGz(archive, destination);
 }
 export class LocalNeo4j {
   dataRoot: string; home: string; jre: string; confDir: string; dataDir: string; logsDir: string; runDir: string;
@@ -133,12 +203,23 @@ export class LocalNeo4j {
     if (this.javaHome) return this.javaHome;
     const name = process.platform === 'win32' ? 'java.exe' : 'java';
     for (const root of [this.jre, join(this.jre, 'Contents', 'Home')]) if (existsSync(join(root, 'bin', name))) return this.javaHome = root;
-    for (const executable of [process.env.DSH_NEO4J_MEMORY_JAVA, ...(process.env.PATH || '').split(sep === '\\' ? ';' : ':').map(p => join(p, name))]) {
+    const candidates: Array<[boolean, string | undefined]> = [
+      [true, process.env.DSH_NEO4J_MEMORY_JAVA],
+      ...(process.env.PATH || '').split(sep === '\\' ? ';' : ':').map(directory => [false, join(directory, name)] as [boolean, string]),
+    ];
+    for (const [explicit, executable] of candidates) {
       if (!executable || !existsSync(executable)) continue;
       try {
         const result = await exec(executable, ['-version'], { windowsHide: true, timeout: 20_000 });
         const match = (result.stderr + result.stdout).match(/version "(\d+)(?:\.(\d+))?/);
-        if (match && Number(match[1] === '1' ? match[2] : match[1]) >= 17) return this.javaHome = dirname(dirname(executable));
+        const major = match ? Number(match[1] === '1' ? match[2] : match[1]) : 0;
+        if (major < 17) continue;
+        // Neo4j 5.26 supports Java 17 and 21; an automatic pick outside that range is skipped
+        // so the bundled JRE is installed instead. An explicit DSH_NEO4J_MEMORY_JAVA is honoured.
+        if (!explicit && major > 21) continue;
+        // /usr/bin/java is usually a symlink into the JDK; JAVA_HOME must be the real installation.
+        const real = await realpath(executable).catch(() => executable);
+        return this.javaHome = dirname(dirname(real));
       } catch {}
     }
     return undefined;
@@ -146,8 +227,9 @@ export class LocalNeo4j {
   private async homeReady() { try { return (await readdir(join(this.home, 'bin'))).length > 0; } catch { return false; } }
   private async download(url: string, checksum: string): Promise<string> {
     const directory = join(this.dataRoot, 'downloads'); await mkdir(directory, { recursive: true });
+    const expected = checksum.toLowerCase();
     const target = join(directory, new URL(url).pathname.split('/').at(-1)!), part = `${target}.part`;
-    if (existsSync(target) && await digest(target) === checksum) return target;
+    if (existsSync(target) && await digest(target) === expected) return target;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         const offset = await stat(part).then(s => s.size).catch(() => 0);
@@ -156,17 +238,27 @@ export class LocalNeo4j {
         if (!response.ok || !response.body) { await response.body?.cancel(); throw new Error('Download failed'); }
         if (response.status === 206 && !response.headers.get('content-range')?.startsWith(`bytes ${offset}-`)) { await response.body.cancel(); throw new Error('Invalid download range'); }
         await pipeline(Readable.fromWeb(response.body as any), createWriteStream(part, { flags: offset && response.status === 206 ? 'a' : 'w' }));
-        if (await digest(part) !== checksum) { await rm(part, { force: true }); throw new Error('Checksum mismatch'); }
+        if (await digest(part) !== expected) { await rm(part, { force: true }); throw new Error('Checksum mismatch'); }
         await rename(part, target); return target;
       } catch { this.signal?.throwIfAborted(); await this.log(`download attempt ${attempt} failed`); if (attempt < 3) await delay(attempt * 2000, undefined, { signal: this.signal }); }
     }
     throw new RuntimeUnavailable(`Could not download runtime; see ${join(this.dataRoot, 'provision.log')}`);
   }
+  private assertSupportedPaths() {
+    if (process.platform === 'win32') return;
+    for (const [label, path] of [['data directory', this.dataRoot], ['runtime directory', this.home]] as const) {
+      if (!/\s/.test(path)) continue;
+      throw new RuntimeUnavailable(`Local Neo4j cannot start from a ${label} that contains whitespace (${path}); Neo4j splits its startup command line. Set DSH_NEO4J_MEMORY_RUNTIME_DIR to a path without spaces, or connect an external Neo4j`);
+    }
+  }
   private async prepareInstall() {
+    this.assertSupportedPaths();
+    const target = runtimeArtifacts();
     const missingHome = !(await this.homeReady()), missingJava = !(await this.resolveJava());
-    if ((missingHome || missingJava) && (process.platform !== 'win32' || process.arch !== 'x64')) throw new RuntimeUnavailable('Managed runtime downloads currently support Windows x64 only');
-    if (missingHome) await extractZip(await this.download(...artifacts.neo4j as [string, string]), this.home);
-    if (missingJava) { await extractZip(await this.download(...artifacts.jre as [string, string]), this.jre); this.javaHome = undefined; }
+    if (!missingHome && !missingJava) return;
+    if (!target) throw new RuntimeUnavailable(`Managed runtime downloads are not available on ${runtimeTarget()}; connect an external Neo4j or set DSH_NEO4J_MEMORY_JAVA to a Java 17+ runtime`);
+    if (missingHome) await extractArchive(target.neo4j.archive, await this.download(target.neo4j.url, target.neo4j.sha256), this.home);
+    if (missingJava) { await extractArchive(target.jre.archive, await this.download(target.jre.url, target.jre.sha256), this.jre); this.javaHome = undefined; }
   }
   async prepare(): Promise<RuntimeInfo> {
     return this.locked(async () => {
@@ -229,7 +321,7 @@ export class LocalNeo4j {
           buffer += chunk;
           if (buffer.includes('\n')) {
             clearTimeout(timer);
-            try { const response = JSON.parse(buffer.split('\n')[0]); if (!Number.isInteger(response.pid)) { void this.log(`Windows watchdog: ${response.diagnostic || response.error || 'invalid handshake'}`); throw new Error(); } this.pid = response.pid; resolve(); }
+            try { const response = JSON.parse(buffer.split('\n')[0]); if (!Number.isInteger(response.pid)) { void this.log(`watchdog: ${response.diagnostic || response.error || 'invalid handshake'}`); throw new Error(); } this.pid = response.pid; resolve(); }
             catch { reject(new RuntimeUnavailable('Cannot launch local Neo4j')); }
           }
         });
@@ -263,7 +355,7 @@ export class LocalNeo4j {
           if ((this.guardian && this.guardian.exitCode !== null) || (this.process && this.process.exitCode !== null)) throw new RuntimeUnavailable(`Local Neo4j exited during startup; inspect ${join(this.logsDir, 'console.log')}`);
           if (await this.probe() === 'ready') {
             this.startedHere = true;
-            await this.writeState({ ...state, password: this.password, port: this.port, neo4j: NEO4J_VERSION });
+            await this.writeState({ ...state, password: this.password, port: this.port, neo4j: this.runtimeVersion() });
             await this.log(`started local Neo4j on port ${this.port}`); return this.info();
           }
           await delay(1000, undefined, { signal: this.signal });
@@ -273,16 +365,26 @@ export class LocalNeo4j {
     });
   }
   private async terminate() {
+    const pid = this.pid;
     if (this.guardian) {
       const child = this.guardian; this.guardian = undefined;
       const exited = new Promise<void>(resolve => { if (child.exitCode !== null) resolve(); else child.once('exit', () => resolve()); });
       child.stdin?.end(); await Promise.race([exited, delay(25_000, undefined, { ref: false })]);
-    } else if (this.pid) {
-      if (process.platform === 'win32') await exec('taskkill', ['/PID', String(this.pid), '/T', '/F'], { windowsHide: true, timeout: 20_000 }).catch(() => {});
-      else { try { process.kill(-this.pid, 'SIGTERM'); } catch {} }
+    } else if (pid) {
+      if (process.platform === 'win32') await exec('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, timeout: 20_000 }).catch(() => {});
+      else { try { process.kill(-pid, 'SIGTERM'); } catch {} }
     }
     this.process = undefined; this.pid = undefined;
     for (let i = 0; i < 100 && await portOpen(this.port); i++) await delay(200);
+    if (process.platform !== 'win32' && pid) {
+      // The bolt port closes before Neo4j finishes shutting down; an immediate restart would
+      // collide with the old process. Wait for it to exit, then escalate if it is stuck.
+      for (let i = 0; i < 150 && processAlive(pid); i++) await delay(200);
+      if (processAlive(pid)) {
+        try { process.kill(-pid, 'SIGKILL'); } catch {}
+        for (let i = 0; i < 50 && processAlive(pid); i++) await delay(100);
+      }
+    }
     if (await portOpen(this.port)) throw new RuntimeUnavailable('Local Neo4j is still running after shutdown');
     await rm(join(this.runDir, 'dsh-neo4j-memory.pid'), { force: true });
   }
@@ -291,9 +393,10 @@ export class LocalNeo4j {
     if (!this.startedHere || this.detach || process.env.DSH_NEO4J_MEMORY_NEO4J_KEEP_RUNNING === '1') return;
     await this.terminate(); this.startedHere = false; await this.log('stopped local Neo4j');
   }
+  private runtimeVersion() { return runtimeArtifacts()?.neo4j.version ?? NEO4J_VERSION; }
   async status() {
     this.loadState(await this.readState());
-    return { installed: await this.homeReady() && !!await this.resolveJava(), home: this.home, data: this.dataDir, port: this.port, running: !!this.password && await this.probe() === 'ready', version: NEO4J_VERSION };
+    return { installed: await this.homeReady() && !!await this.resolveJava(), home: this.home, data: this.dataDir, port: this.port, running: !!this.password && await this.probe() === 'ready', version: this.runtimeVersion() };
   }
   async startPersistent() { this.detach = true; return this.ensure(); }
   async stopPersistent() {
@@ -306,6 +409,9 @@ export class LocalNeo4j {
       if (process.platform === 'win32') {
         const result = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" | Select-Object -ExpandProperty CommandLine`], { windowsHide: true });
         if (!result.stdout.includes('org.neo4j.server.startup.Neo4jCommand') || !result.stdout.includes(this.home)) throw new RuntimeUnavailable('Stored process no longer belongs to this runtime');
+      } else if (process.platform === 'linux') {
+        const commandLine = await readFile(`/proc/${pid}/cmdline`, 'utf8').catch(() => '');
+        if (!commandLine.includes('org.neo4j.server.startup.Neo4jCommand') || !commandLine.includes(this.home)) throw new RuntimeUnavailable('Stored process no longer belongs to this runtime');
       }
       this.pid = pid; await this.terminate();
     });

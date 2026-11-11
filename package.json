@@ -1,7 +1,7 @@
 {
   "name": "dsh-neo4j-memory",
   "version": "0.8.0",
-  "description": "Community Neo4j graph-memory plugin for DeepSeek Harness on Windows: events, people, concepts and places, with a local runtime, settings UI and read-only graph viewer",
+  "description": "Community Neo4j graph-memory plugin for DeepSeek Harness: events, people, concepts and places, with a local runtime, settings UI and read-only graph viewer",
   "license": "MIT",
   "author": {
     "name": "shuunO-O",
@@ -27,7 +27,8 @@
   "type": "module",
   "main": "index.js",
   "os": [
-    "win32"
+    "win32",
+    "linux"
   ],
   "cpu": [
     "x64"
