@@ -28,8 +28,8 @@ export declare function portOpen(port: number): Promise<boolean>;
 export declare function guardArchivePath(root: string, name: string): string;
 export declare function extractZip(archive: string, destination: string): Promise<void>;
 /**
- * Extract a .tar.gz with the system tar. Members are listed and validated before extraction;
- * links and special files are refused so staged content cannot escape the staging tree.
+ * Validate the archive before writing files. Internal file symlinks (used by Temurin)
+ * are copied after extraction, so no archive entry can write through a symlink.
  */
 export declare function extractTarGz(archive: string, destination: string): Promise<void>;
 export declare function extractArchive(kind: ArchiveKind, archive: string, destination: string): Promise<void>;

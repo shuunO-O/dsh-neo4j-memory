@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { LocalNeo4j, portOpen } from '../lib/runtime.js';
 
 const archive = process.env.DSH_NEO4J_MEMORY_TEST_NEO4J_ARCHIVE;
+const jreArchive = process.env.DSH_NEO4J_MEMORY_TEST_JRE_ARCHIVE;
 const skip = process.platform !== 'linux' || !archive;
 
 function findJava() {
@@ -24,9 +25,11 @@ async function digest(path) {
   for await (const chunk of createReadStream(path)) hash.update(chunk);
   return hash.digest('hex');
 }
-async function serveArchive(path) {
+async function serveArchive(path, filename = 'neo4j-community-test-unix.tar.gz') {
   const total = (await stat(path)).size;
+  let requests = 0;
   const server = createServer((request, response) => {
+    requests++;
     const range = /^bytes=(\d+)-/.exec(request.headers.range || '');
     if (range) {
       const start = Number(range[1]), end = total - 1;
@@ -39,7 +42,8 @@ async function serveArchive(path) {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   return {
-    url: `http://127.0.0.1:${server.address().port}/neo4j-community-test-unix.tar.gz`,
+    url: `http://127.0.0.1:${server.address().port}/${filename}`,
+    requests: () => requests,
     close: () => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); },
   };
 }
@@ -52,14 +56,22 @@ async function waitClosed(port, timeout = 60_000) {
 test('managed Linux runtime: download, checksum, tar extraction, watchdog and persistence', { skip, timeout: 600_000 }, async t => {
   const root = await mkdtemp(join(process.env.DSH_NEO4J_MEMORY_TEST_TMPDIR || tmpdir(), 'dsh-neo4j-linux-runtime-'));
   const server = await serveArchive(archive);
+  t.after(() => server.close());
+  const jreServer = jreArchive ? await serveArchive(jreArchive, 'temurin-jre-test.tar.gz') : undefined;
+  if (jreServer) t.after(() => jreServer.close());
   const java = process.env.DSH_NEO4J_MEMORY_JAVA || findJava();
-  const keys = ['DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_URL', 'DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_SHA256', 'DSH_NEO4J_MEMORY_JAVA'];
+  const keys = ['DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_URL', 'DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_SHA256', 'DSH_NEO4J_MEMORY_JRE_ARCHIVE_URL', 'DSH_NEO4J_MEMORY_JRE_ARCHIVE_SHA256', 'DSH_NEO4J_MEMORY_JAVA', 'PATH'];
   const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   process.env.DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_URL = server.url;
   process.env.DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_SHA256 = await digest(archive);
   if (java) process.env.DSH_NEO4J_MEMORY_JAVA = java;
+  if (jreServer) {
+    process.env.DSH_NEO4J_MEMORY_JRE_ARCHIVE_URL = jreServer.url;
+    process.env.DSH_NEO4J_MEMORY_JRE_ARCHIVE_SHA256 = await digest(jreArchive);
+    delete process.env.DSH_NEO4J_MEMORY_JAVA;
+    process.env.PATH = ''; // Exercise managed JRE provisioning with no system Java or tar.
+  }
   t.after(async () => {
-    await server.close();
     for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
   });
 
@@ -67,6 +79,7 @@ test('managed Linux runtime: download, checksum, tar extraction, watchdog and pe
   t.after(async () => { await runtime.stop().catch(() => {}); });
   const info = await runtime.ensure();
   assert.ok(await portOpen(info.port), 'managed Neo4j listens after provisioning');
+  if (jreServer) assert.equal(await runtime.resolveJava(), join(root, 'jre'));
   assert.equal(await runtime.probe(), 'ready');
   assert.ok((await readdir(join(root, 'neo4j', 'bin'))).length > 0, 'distribution extracted with bin/');
   assert.ok(existsSync(join(root, 'downloads')), 'archive kept in the download cache');
@@ -116,4 +129,6 @@ test('managed Linux runtime: download, checksum, tar extraction, watchdog and pe
   assert.ok(await portOpen(port));
   host.kill('SIGKILL');
   assert.ok(await waitClosed(port), 'watchdog stops Java when the host is killed');
+  assert.equal(server.requests(), 1, 'Neo4j archive is downloaded only once across restarts');
+  if (jreServer) assert.equal(jreServer.requests(), 1, 'JRE archive is downloaded only once across restarts');
 });

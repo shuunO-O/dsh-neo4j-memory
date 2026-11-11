@@ -1,16 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { MemoryConfig, parseBoolean } from '../lib/config.js';
 import { ModelClient, validateExtraction } from '../lib/api.js';
 import { alignConcepts, validateAnswer } from '../lib/alignment.js';
 import { MemoryService, MemoryBackend } from '../lib/service.js';
 import { Neo4jStore } from '../lib/store.js';
-import { guardArchivePath, extractZip, extractTarGz, extractArchive, runtimeArtifacts, defaultDataRoot } from '../lib/runtime.js';
+import { LocalNeo4j, guardArchivePath, extractZip, extractTarGz, extractArchive, runtimeArtifacts, defaultDataRoot } from '../lib/runtime.js';
 
 const extraction = () => ({ event: { type: 'study', summary: '学习 TypeScript' }, entities: { persons: ['测试用户'], locations: [], concepts: ['TypeScript'] }, relationships: [
   { source: '测试用户', target: 'CURRENT_EVENT', type: 'PARTICIPATED_IN' }, { source: 'CURRENT_EVENT', target: 'TypeScript', type: 'MENTIONS' },
@@ -269,10 +270,70 @@ test('TAR.GZ members are validated before extraction and a valid archive is stag
     ['hardlink', [{ name: 'pkg/link', type: '1', linkname: 'pkg/file' }]],
   ]) {
     const archive = join(dir, `${label}.tar.gz`); await writeFile(archive, tarGz(entries));
-    await assert.rejects(extractTarGz(archive, join(dir, label)), /unsafe path|symbolic or hard link|unsupported entry/, label);
+    await assert.rejects(extractTarGz(archive, join(dir, label)), /unsafe path|unsafe symbolic link|unsupported entry/, label);
     assert.equal(existsSync(join(dir, label)), false, `${label} must not be installed`);
   }
 });
+test('TAR.GZ internal file symlinks are materialized without creating filesystem links', async () => {
+  const dir = await tarTemp('tar-links-');
+  const archive = join(dir, 'jre.tar.gz');
+  await writeFile(archive, tarGz([
+    { name: 'jre/legal/java.xml/LICENSE', type: '2', linkname: '../java.base/LICENSE' },
+    { name: 'jre/legal/java.base/LICENSE', content: 'license text' },
+    { name: 'jre/bin/java', content: 'executable', mode: 0o755 },
+    { name: 'jre/bin/java-copy', type: '2', linkname: 'java' },
+  ]));
+  const destination = join(dir, 'installed');
+  await extractTarGz(archive, destination);
+  const license = join(destination, 'legal', 'java.xml', 'LICENSE');
+  assert.equal(await readFile(license, 'utf8'), 'license text');
+  assert.equal((await lstat(license)).isFile(), true);
+  assert.equal(await readFile(join(destination, 'bin', 'java-copy'), 'utf8'), 'executable');
+  if (process.platform !== 'win32') {
+    const originalMode = (await lstat(join(destination, 'bin', 'java'))).mode & 0o777;
+    assert.equal((await lstat(join(destination, 'bin', 'java-copy'))).mode & 0o777, originalMode);
+    assert.equal(originalMode & 0o111, 0o111);
+  }
+});
+
+test('TAR.GZ rejects unsafe links and conflicting members before writing archive files', async () => {
+  const dir = await tarTemp('tar-unsafe-links-');
+  const file = { name: 'pkg/file', content: 'safe' };
+  for (const [label, entries] of [
+    ['escape', [file, { name: 'pkg/link', type: '2', linkname: '../../escape' }]],
+    ['absolute', [file, { name: 'pkg/link', type: '2', linkname: '/etc/passwd' }]],
+    ['windows', [file, { name: 'pkg/link', type: '2', linkname: 'C:\\outside' }]],
+    ['dangling', [file, { name: 'pkg/link', type: '2', linkname: 'missing' }]],
+    ['chain', [file, { name: 'pkg/link', type: '2', linkname: 'file' }, { name: 'pkg/chain', type: '2', linkname: 'link' }]],
+    ['directory', [{ name: 'pkg/dir/', type: '5' }, { name: 'pkg/link', type: '2', linkname: 'dir' }]],
+    ['link-parent', [file, { name: 'pkg/link', type: '2', linkname: 'file' }, { name: 'pkg/link/payload', content: 'bad' }]],
+    ['duplicate', [file, { ...file, content: 'replacement' }]],
+    ['duplicate-link', [file, { name: 'pkg/file', type: '2', linkname: 'file' }]],
+    ['hardlink', [file, { name: 'pkg/link', type: '1', linkname: 'pkg/file' }]],
+    ['fifo', [file, { name: 'pkg/fifo', type: '6' }]],
+    ['sibling-package', [{ name: 'other/file', content: 'outside package' }, { name: '././pkg/link', type: '2', linkname: '../other/file' }]],
+  ]) {
+    const archive = join(dir, `${label}.tar.gz`), destination = join(dir, label);
+    await writeFile(archive, tarGz(entries));
+    await assert.rejects(extractTarGz(archive, destination), /unsafe|regular file|non-directory|duplicate|unsupported/, label);
+    assert.equal(existsSync(destination), false, `${label} must not be installed`);
+  }
+});
+
+test('a failed extraction reuses the checksum-verified download on the next runtime instance', async t => {
+  const root = await tarTemp('download-cache-');
+  const archive = tarGz([{ name: 'pkg/link', type: '2', linkname: '/outside' }]);
+  const checksum = createHash('sha256').update(archive).digest('hex');
+  let requests = 0;
+  const url = await server(t, (_req, res) => { requests++; res.end(archive); });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const runtime = new LocalNeo4j(root);
+    const cached = await runtime.download(`${url}/jre.tar.gz`, checksum);
+    await assert.rejects(extractTarGz(cached, join(root, 'jre')), /unsafe symbolic link/);
+  }
+  assert.equal(requests, 1);
+});
+
 test('extractArchive dispatches on the artifact kind', async () => {
   const dir = await tarTemp('dispatch-');
   const archive = join(dir, 'valid.tar.gz');

@@ -43,7 +43,7 @@
 - DSH `>=0.2.1-rc.2 <0.3.0`
 - Node.js 22+（宿主内置）
 - 首次下载运行时需要访问 `dist.neo4j.org` 与 GitHub Release，或通过归档 URL 变量指向镜像
-- Linux 托管运行时使用系统 `tar` 解压归档
+- Linux 托管运行时在插件内解压归档，无需系统 Java 或 `tar`
 - 提取与向量 API Key；概念对齐 Key 可选
 
 ## 安装
@@ -128,7 +128,7 @@ dsh plugin --profile web add github:shuunO-O/dsh-neo4j-memory
 
 #### Linux 与 WSL
 
-Linux 首次调用会下载 `neo4j-community-5.26.30-unix.tar.gz` 与 Temurin 21 Linux JRE，并用系统 `tar` 解压。默认数据目录在用户主目录下，一般无需额外权限。
+Linux 首次调用会下载 `neo4j-community-5.26.30-unix.tar.gz` 与 Temurin 21 Linux JRE，并在插件内解压。归档中指向同一发行版内普通文件的符号链接会复制为普通文件；越界链接、目录链接、链接链、硬链接与特殊文件仍会被拒绝。默认数据目录在用户主目录下，一般无需额外权限。
 
 WSL 中请把数据目录放在 ext4 文件系统（如 `~/.local/share` 或项目目录），不要放在 `/mnt/c` 等 DrvFs 挂载点：跨文件系统的重命名会报 `EXDEV`，部分目录也无法完成原子写入。内存较小的 WSL 实例可减少同时运行的服务，或改用外部 Neo4j。
 
@@ -258,7 +258,9 @@ Windows PowerShell 下命令相同。
 - Linux 托管运行时的下载、校验、解压、守护与持久化由单独用例覆盖：
 
   ```bash
-  DSH_NEO4J_MEMORY_TEST_NEO4J_ARCHIVE=/path/to/neo4j-community-5.26.30-unix.tar.gz node tests/linux-runtime.test.mjs
+  DSH_NEO4J_MEMORY_TEST_NEO4J_ARCHIVE=/path/to/neo4j-community-5.26.30-unix.tar.gz \
+  DSH_NEO4J_MEMORY_TEST_JRE_ARCHIVE=/path/to/OpenJDK21U-jre_x64_linux_hotspot_21.0.12.1_1.tar.gz \
+  node tests/linux-runtime.test.mjs
   ```
 
 - `npm publish` 会先执行 `prepublishOnly`：构建 + selfcheck + 后端测试；`npm pack` 会先构建。
