@@ -7,9 +7,10 @@ import { MemoryConfig } from '../lib/config.js';
 import { MemoryService } from '../lib/service.js';
 import { LocalNeo4j } from '../lib/runtime.js';
 import { renderMemoryEvidence } from '../lib/evidence.js';
+import { scratchRoot, seedRuntime } from './fixtures/managed-runtime.mjs';
 
 test('isolated Neo4j: layered evidence, actual global degree, source offsets and filtered resumable graph expansion', {skip:process.env.DSH_NEO4J_MEMORY_INTEGRATION!=='1',timeout:180000},async t=>{
-  await mkdir(join(process.cwd(),'tmp'),{recursive:true});const root=await mkdtemp(join(process.cwd(),'tmp','evidence-integration-')),runtime=new LocalNeo4j(root);let service;
+  const root=await scratchRoot('dsh-neo4j-evidence-integration-');await seedRuntime(root);const runtime=new LocalNeo4j(root);let service;
   t.after(async()=>{await service?.close();await runtime.stop();});const info=await runtime.ensure();
   const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:info.password,embeddingApiKey:'fixture',embeddingDimensions:2},{DSH_NEO4J_MEMORY_NEO4J_URI:info.uri});
   let calls=0;const http=createServer(async(req,res)=>{for await(const chunk of req){};calls++;res.setHeader('content-type','application/json');res.end(JSON.stringify({data:[{index:0,embedding:[1,0]}]}));});
@@ -40,8 +41,7 @@ test('isolated Neo4j: layered evidence, actual global degree, source offsets and
 });
 
 test('isolated Neo4j: source session scopes filter search routes and graph/session continuations', {skip:process.env.DSH_NEO4J_MEMORY_INTEGRATION!=='1',timeout:180000},async t=>{
-  await mkdir(join(process.cwd(),'tmp'),{recursive:true});
-  const root=await mkdtemp(join(process.cwd(),'tmp','session-integration-')),runtime=new LocalNeo4j(root);let service;
+  const root=await scratchRoot('dsh-neo4j-session-integration-');await seedRuntime(root);const runtime=new LocalNeo4j(root);let service;
   t.after(async()=>{await service?.close();await runtime.stop();});const info=await runtime.ensure();
   const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:info.password,embeddingApiKey:'fixture',embeddingDimensions:2},{DSH_NEO4J_MEMORY_NEO4J_URI:info.uri});
   const http=createServer(async(req,res)=>{const chunks=[];for await(const c of req)chunks.push(c);const body=JSON.parse(Buffer.concat(chunks));
@@ -77,8 +77,7 @@ test('isolated Neo4j: source session scopes filter search routes and graph/sessi
 });
 
 test('isolated Neo4j: reembed builds atomic source chunks and content rescues a missing summary candidate', {skip:process.env.DSH_NEO4J_MEMORY_INTEGRATION!=='1',timeout:180000},async t=>{
-  await mkdir(join(process.cwd(),'tmp'),{recursive:true});
-  const root=await mkdtemp(join(process.cwd(),'tmp','hybrid-integration-')),runtime=new LocalNeo4j(root);let service;
+  const root=await scratchRoot('dsh-neo4j-hybrid-integration-');await seedRuntime(root);const runtime=new LocalNeo4j(root);let service;
   t.after(async()=>{await service?.close();await runtime.stop();});const info=await runtime.ensure();
   const cfg=MemoryConfig.fromEnvironment({neo4jMode:'external',neo4jPassword:info.password,embeddingApiKey:'fixture',embeddingDimensions:2},{DSH_NEO4J_MEMORY_NEO4J_URI:info.uri});
   let fail=false, calls=0;

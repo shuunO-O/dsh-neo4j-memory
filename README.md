@@ -14,7 +14,7 @@
 ## 特性
 
 - 四类节点：`Event`、`Person`、`Concept`、`Location`；四类关系：`PARTICIPATED_IN`、`OCCURRED_AT`、`MENTIONS`、`HAS_ATTITUDE`
-- 首次调用自动下载本地 Neo4j 5.26.30 + Temurin JRE 21（约 211 MB），无需系统 Java；也可连外部 Neo4j
+- 首次调用自动下载本地 Neo4j 5.26.30 + Temurin JRE 21（约 211 MB；Windows 用 zip，Linux 用 tar.gz），无需系统 Java；也可连外部 Neo4j
 - 设置页：三组模型 Key 与端点、概念对齐开关与阈值、向量维度、重新向量化
 - 只读图谱页：查看实际写入的节点、关系和属性（导入上限 5,000 节点 / 30,000 关系）
 - 写入是一个 Neo4j 事务，失败回滚
@@ -39,9 +39,11 @@
 
 ## 要求
 
-- Windows 10/11 x64
+- Windows 10/11 x64 或 Linux x64（含 WSL2）
 - DSH `>=0.2.1-rc.2 <0.3.0`
-- Node.js 22+（桌面宿主内置）
+- Node.js 22+（宿主内置）
+- 首次下载运行时需要访问 `dist.neo4j.org` 与 GitHub Release，或通过归档 URL 变量指向镜像
+- Linux 托管运行时使用系统 `tar` 解压归档
 - 提取与向量 API Key；概念对齐 Key 可选
 
 ## 安装
@@ -67,6 +69,14 @@ $cli = "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 ```
 
 `--profile desktop` 是桌面版默认 profile；如果你用的是其他 profile，换成对应名称。
+
+Linux / WSL（`dsh` 在 PATH 中；web 版 profile 通常为 `web`）：
+
+```bash
+dsh plugin --profile web add dsh-neo4j-memory
+# 或从 GitHub 安装
+dsh plugin --profile web add github:shuunO-O/dsh-neo4j-memory
+```
 
 ## 配置
 
@@ -108,7 +118,7 @@ $cli = "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 
 ### 本地 Neo4j
 
-默认 `DSH_NEO4J_MEMORY_NEO4J_MODE=auto`：没有配置外部 URI/密码时使用本地实例，首次调用工具时下载并启动。数据、日志、`state.json` 位于 `%LOCALAPPDATA%\dsh-neo4j-memory\`，可在设置页改到其他可写目录（需重启）。
+默认 `DSH_NEO4J_MEMORY_NEO4J_MODE=auto`：没有配置外部 URI/密码时使用本地实例，首次调用工具时下载并启动。数据、日志、`state.json` 位于 Windows 的 `%LOCALAPPDATA%\dsh-neo4j-memory\`，Linux 为 `~/.local/share/dsh-neo4j-memory/`（可用 `XDG_DATA_HOME` 覆盖），可在设置页改到其他可写目录（需重启）。
 
 本地数据目录还需要支持 Neo4j 的文件重命名和原子写入。部分 Windows 目录可能无法完成这些操作，即使文件都在同一目录下，也可能出现 `EXDEV` 或 `AtomicMoveNotSupportedException`。如果首次启动遇到这类错误，可以在 **设置 → Neo4j 记忆 → 数据库 → 本地数据目录**中指定其他可写目录（推荐），例如 `D:\dsh-neo4j-memory-data`，保存后重启 DSH。目录不一定要在 D 盘，也不需要移动 DSH 或插件；选择时请注意目录的访问权限和加密设置。
 
@@ -116,14 +126,24 @@ $cli = "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
 
 同一时间只建议运行一个使用托管模式的 DSH 实例。想让本地实例在 DSH 退出后继续运行，设置 `DSH_NEO4J_MEMORY_NEO4J_KEEP_RUNNING=1`。
 
+#### Linux 与 WSL
+
+Linux 首次调用会下载 `neo4j-community-5.26.30-unix.tar.gz` 与 Temurin 21 Linux JRE，并用系统 `tar` 解压。默认数据目录在用户主目录下，一般无需额外权限。
+
+WSL 中请把数据目录放在 ext4 文件系统（如 `~/.local/share` 或项目目录），不要放在 `/mnt/c` 等 DrvFs 挂载点：跨文件系统的重命名会报 `EXDEV`，部分目录也无法完成原子写入。内存较小的 WSL 实例可减少同时运行的服务，或改用外部 Neo4j。
+
+Neo4j 5.26 启动时会按空白拆分自己的启动命令，数据目录以及插件所在路径都不要包含空格或制表符，否则密码初始化或启动会失败；可用 `DSH_NEO4J_MEMORY_RUNTIME_DIR` 指向不含空格的目录，或改用外部 Neo4j。
+
+无法访问官方下载源时，可用 `DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_URL` / `_SHA256` 与 `DSH_NEO4J_MEMORY_JRE_ARCHIVE_URL` / `_SHA256` 指向镜像归档；也可以用系统 Java 加外部 Neo4j，跳过托管下载。
+
 排障日志：
 
-- `%LOCALAPPDATA%\dsh-neo4j-memory\provision.log`
-- `%LOCALAPPDATA%\dsh-neo4j-memory\logs\console.log`
+- Windows：`%LOCALAPPDATA%\dsh-neo4j-memory\provision.log`、`...\logs\console.log`
+- Linux：`~/.local/share/dsh-neo4j-memory/provision.log`、`.../logs/console.log`
 
 如果设置了其他本地数据目录，请在该目录下查找相同的日志文件。
 
-Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分发这些二进制，首次运行时从官方地址下载（下载失败可考虑设置代理）。
+Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分发这些二进制，首次运行时从官方地址下载（下载失败可考虑设置代理，或用归档 URL 变量改用镜像）。
 
 ## 环境变量（可选）
 
@@ -134,7 +154,10 @@ Neo4j Community 采用 GPLv3，Temurin JRE 采用 GPLv2+CE；插件不随包分�
 | `DSH_NEO4J_MEMORY_NEO4J_MODE` | `auto`（`auto` / `managed` / `external`） |
 | `DSH_NEO4J_MEMORY_NEO4J_URI` | `bolt://localhost:7687`（external） |
 | `NEO4J_PASSWORD` | 无；external 必填 |
-| `DSH_NEO4J_MEMORY_RUNTIME_DIR` | `%LOCALAPPDATA%\dsh-neo4j-memory` |
+| `DSH_NEO4J_MEMORY_RUNTIME_DIR` | Windows 为 `%LOCALAPPDATA%\dsh-neo4j-memory`，Linux 为 `$XDG_DATA_HOME` 或 `~/.local/share/dsh-neo4j-memory` |
+| `DSH_NEO4J_MEMORY_JAVA` | 无；Java 17+ 可执行文件，未下载 JRE 时使用 |
+| `DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_URL` / `_SHA256` | 官方 Neo4j 归档地址与校验和；用于镜像或离线安装 |
+| `DSH_NEO4J_MEMORY_JRE_ARCHIVE_URL` / `_SHA256` | 官方 Temurin 归档地址与校验和；用于镜像或离线安装 |
 | `DSH_NEO4J_MEMORY_EXTRACTION_URL` / `_MODEL` | `https://api.deepseek.com` / `deepseek-flash` |
 | `DSH_NEO4J_MEMORY_EMBEDDING_URL` / `_MODEL` | DashScope compatible / `qwen3.7-text-embedding` |
 | `DSH_NEO4J_MEMORY_EMBEDDING_DIMENSIONS` | `1024` |
@@ -207,11 +230,11 @@ cursor 绑定当前会话，15 分钟内有效，重启后需重新检索；每�
 - 提取与合并较粗：仅单次抽取；概念按名称/别名 + 向量 + 两两判同，不保证一定准确。
 - 初始事件召回依赖摘要与原文分块向量；旧记忆没有原文分块时只能靠摘要命中。沿概念扩展不能补回数据库里缺失的关系，也不保证关键事实完整。
 - 图谱只读：没有删除、合并、编辑节点/关系的 UI。
-- 测试覆盖范围有限：六人物成绩包含模型判分，仍可能存在误判；[小说检索对照](public/dawn-retrieval-study/README.md)只覆盖《黎明之剑》前 500 章、18 道开发题与 6 道新题。插件仅在 Windows x64 上测试过。
+- 测试覆盖范围有限：六人物成绩包含模型判分，仍可能存在误判；[小说检索对照](public/dawn-retrieval-study/README.md)只覆盖《黎明之剑》前 500 章、18 道开发题与 6 道新题。插件在 Windows x64 与 WSL2 Ubuntu x64 上完成测试，其他 Linux 发行版未逐一验证。
 
 ## 开发
 
-```powershell
+```bash
 npm ci --legacy-peer-deps
 npm run build
 node selfcheck.mjs
@@ -219,8 +242,25 @@ node tests/backend.test.mjs
 npm pack
 ```
 
+Windows PowerShell 下命令相同。
+
+
 - `src/` 是 TypeScript 源码，`lib/` 是编译产物，`assets/` 是提取提示词，`web/graph/` 是图谱页面。
-- `npm test` 使用 `node --test`；`DSH_NEO4J_MEMORY_INTEGRATION=1 node tests/integration.test.mjs` 可跑真实 Neo4j 集成测试。
+- `npm test` 使用 `node --test`；`DSH_NEO4J_MEMORY_INTEGRATION=1 node tests/integration.test.mjs` 可跑真实 Neo4j 集成测试（首次会下载托管运行时）。
+- 无法访问官方下载源时，用已解压的发行版与系统 Java 离线跑集成测试：
+
+  ```bash
+  DSH_NEO4J_MEMORY_TEST_NEO4J_HOME=/path/to/neo4j \
+  DSH_NEO4J_MEMORY_TEST_JAVA=/path/to/java \
+  DSH_NEO4J_MEMORY_INTEGRATION=1 node tests/integration.test.mjs
+  ```
+
+- Linux 托管运行时的下载、校验、解压、守护与持久化由单独用例覆盖：
+
+  ```bash
+  DSH_NEO4J_MEMORY_TEST_NEO4J_ARCHIVE=/path/to/neo4j-community-5.26.30-unix.tar.gz node tests/linux-runtime.test.mjs
+  ```
+
 - `npm publish` 会先执行 `prepublishOnly`：构建 + selfcheck + 后端测试；`npm pack` 会先构建。
 
 ## 隐私

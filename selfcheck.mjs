@@ -58,7 +58,10 @@ if (!plugin) process.exit(1)
 
 for (const entry of plugin.hostDependencyNotes || []) note(entry)
 assert(plugin.name === 'dsh-neo4j-memory', 'plugin name is dsh-neo4j-memory')
-assert(plugin.Config === undefined || typeof plugin.Config === 'object', 'Config is an object, or undefined when schemastery is unavailable')
+// schemastery returns a callable Schema when the host tree provides it, and Config stays
+// undefined when it does not; both shapes are valid for the loader.
+assert(plugin.Config === undefined || typeof plugin.Config === 'object' || typeof plugin.Config === 'function', 'Config is available in the host schema shape, or undefined when schemastery is unavailable')
+const hostResolved = (plugin.hostDependencyNotes || []).some(entry => entry.includes('loaded from the host tree'))
 
 const tools = []
 const routes = []
@@ -100,7 +103,11 @@ for (const tool of tools) {
   assert(typeof tool.description === 'string' && tool.description.length > 20, `${tool.name}: description present`)
   assert(typeof tool.execute === 'function', `${tool.name}: execute is a function`)
   assert(tool.parameters?.type === 'object', `${tool.name}: parameters converted to JSON Schema`)
-  assert(tool.parameters?.additionalProperties === false, `${tool.name}: parameters reject unknown keys`)
+  // The bundled fallback converter emits a strict JSON Schema; the host defineTool
+  // keeps the spec and validates arguments through its own pipeline.
+  assert(hostResolved
+    ? tool.parameters?.type === 'object' && Object.keys(tool.parameters?.properties || {}).length > 0
+    : tool.parameters?.additionalProperties === false, `${tool.name}: parameters converted for the active host`)
   const requiresArguments = Object.values(tool.parameters?.properties || {}).length > 0
   const expectedRequired = tool.name === 'memory_database_save' ? ['content'] : []
   const required = tool.parameters?.required || []

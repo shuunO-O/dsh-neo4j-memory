@@ -5,12 +5,13 @@ import { join } from 'node:path';
 import { LocalNeo4j } from '../lib/runtime.js';
 import { MemoryConfig } from '../lib/config.js';
 import { MemoryService } from '../lib/service.js';
+import { scratchRoot, seedRuntime } from './fixtures/managed-runtime.mjs';
 
 test('real Neo4j accepts a stored password beginning with a dash and serves an empty search', {
   skip: process.env.DSH_NEO4J_MEMORY_PASSWORD_INTEGRATION !== '1', timeout: 120000,
 }, async t => {
-  await mkdir(join(process.cwd(), 'tmp'), { recursive: true });
-  const root = await mkdtemp(join(process.cwd(), 'tmp', 'runtime-password-'));
+  const root = await scratchRoot('dsh-neo4j-runtime-password-');
+  await seedRuntime(root);
   const password = '-regression-fixture-never-a-real-password';
   await writeFile(join(root, 'state.json'), JSON.stringify({ password }));
   const runtime = new LocalNeo4j(root);
