@@ -47,7 +47,7 @@ export const Config = z ? z.object({
   neo4jPassword: z.string().role('secret').volatile().default('')
     .description('Legacy external Neo4j password, migrated to DSH credentials. NEO4J_PASSWORD overrides saved credentials.'),
   dataDir: z.string().volatile().default('')
-    .description('Folder that holds the local Neo4j data; leave empty for %LOCALAPPDATA%\\dsh-neo4j-memory. Set a folder the harness may write to when the local database cannot start. Takes effect the next time the memory backend starts.'),
+    .description('Folder that holds the local Neo4j data; leave empty for the platform default (%LOCALAPPDATA%\\dsh-neo4j-memory on Windows, $XDG_DATA_HOME or ~/.local/share/dsh-neo4j-memory on Linux). Set a folder the harness may write to when the local database cannot start. Takes effect the next time the memory backend starts.'),
 }) : undefined
 
 export const hostDependencyNotes = hostDeps.notes

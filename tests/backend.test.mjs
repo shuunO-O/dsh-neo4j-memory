@@ -1,14 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
+import { lstat, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { MemoryConfig, parseBoolean } from '../lib/config.js';
 import { ModelClient, validateExtraction } from '../lib/api.js';
 import { alignConcepts, validateAnswer } from '../lib/alignment.js';
 import { MemoryService, MemoryBackend } from '../lib/service.js';
 import { Neo4jStore } from '../lib/store.js';
-import { guardArchivePath, extractZip } from '../lib/runtime.js';
+import { LocalNeo4j, guardArchivePath, extractZip, extractTarGz, extractArchive, runtimeArtifacts, defaultDataRoot } from '../lib/runtime.js';
 
 const extraction = () => ({ event: { type: 'study', summary: '学习 TypeScript' }, entities: { persons: ['测试用户'], locations: [], concepts: ['TypeScript'] }, relationships: [
   { source: '测试用户', target: 'CURRENT_EVENT', type: 'PARTICIPATED_IN' }, { source: 'CURRENT_EVENT', target: 'TypeScript', type: 'MENTIONS' },
@@ -223,4 +226,153 @@ test('ZIP paths cannot escape staging, and valid ZIP is extracted without PowerS
   const archive = join(dir, 'fixture.zip'); await writeFile(archive, Buffer.concat([local, name, data, central, name, end]));
   await extractZip(archive, join(dir, 'runtime')); assert.equal(await readFile(join(dir, 'runtime', 'file.txt'), 'utf8'), 'ok');
   await assert.rejects(extractZip(archive, join(dir, 'runtime')), /Incomplete runtime/);
+});
+
+const tarTemp = async prefix => { await mkdir(join(process.cwd(), 'tmp'), { recursive: true }); return mkdtemp(join(process.cwd(), 'tmp', prefix)); };
+function tarHeader(name, { type = '0', size = 0, mode = 0o644, linkname = '' } = {}) {
+  const header = Buffer.alloc(512);
+  const octal = (value, length) => value.toString(8).padStart(length - 1, '0') + '\0';
+  header.write(name, 0, 100, 'utf8');
+  header.write(octal(mode, 8), 100, 8, 'utf8');
+  header.write(octal(0, 8), 108, 8, 'utf8');
+  header.write(octal(0, 8), 116, 8, 'utf8');
+  header.write(octal(size, 12), 124, 12, 'utf8');
+  header.write(octal(0, 12), 136, 12, 'utf8');
+  header.write('        ', 148, 8, 'utf8');
+  header.write(type, 156, 1, 'utf8');
+  header.write(linkname, 157, 100, 'utf8');
+  header.write('ustar\0', 257, 6, 'utf8');
+  header.write('00', 263, 2, 'utf8');
+  let sum = 0; for (const byte of header) sum += byte;
+  header.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'utf8');
+  return header;
+}
+function tarGz(entries) {
+  const blocks = [];
+  for (const entry of entries) {
+    const data = Buffer.from(entry.content ?? '', 'utf8');
+    blocks.push(tarHeader(entry.name, { type: entry.type, size: data.length, linkname: entry.linkname, mode: entry.mode ?? (entry.type === '5' ? 0o755 : 0o644) }));
+    if (data.length) { const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512); data.copy(padded); blocks.push(padded); }
+  }
+  blocks.push(Buffer.alloc(1024));
+  return gzipSync(Buffer.concat(blocks));
+}
+test('TAR.GZ members are validated before extraction and a valid archive is staged', async () => {
+  const dir = await tarTemp('tar-');
+  const valid = join(dir, 'valid.tar.gz');
+  await writeFile(valid, tarGz([{ name: 'pkg/', type: '5' }, { name: 'pkg/bin/tool', content: 'ok' }]));
+  await extractTarGz(valid, join(dir, 'runtime'));
+  assert.equal(await readFile(join(dir, 'runtime', 'bin', 'tool'), 'utf8'), 'ok');
+  await assert.rejects(extractTarGz(valid, join(dir, 'runtime')), /Incomplete runtime/);
+  for (const [label, entries] of [
+    ['traversal', [{ name: '../escape.txt', content: 'x' }]],
+    ['symlink', [{ name: 'pkg/link', type: '2', linkname: '/etc/passwd' }]],
+    ['hardlink', [{ name: 'pkg/link', type: '1', linkname: 'pkg/file' }]],
+  ]) {
+    const archive = join(dir, `${label}.tar.gz`); await writeFile(archive, tarGz(entries));
+    await assert.rejects(extractTarGz(archive, join(dir, label)), /unsafe path|unsafe symbolic link|unsupported entry/, label);
+    assert.equal(existsSync(join(dir, label)), false, `${label} must not be installed`);
+  }
+});
+test('TAR.GZ internal file symlinks are materialized without creating filesystem links', async () => {
+  const dir = await tarTemp('tar-links-');
+  const archive = join(dir, 'jre.tar.gz');
+  await writeFile(archive, tarGz([
+    { name: 'jre/legal/java.xml/LICENSE', type: '2', linkname: '../java.base/LICENSE' },
+    { name: 'jre/legal/java.base/LICENSE', content: 'license text' },
+    { name: 'jre/bin/java', content: 'executable', mode: 0o755 },
+    { name: 'jre/bin/java-copy', type: '2', linkname: 'java' },
+  ]));
+  const destination = join(dir, 'installed');
+  await extractTarGz(archive, destination);
+  const license = join(destination, 'legal', 'java.xml', 'LICENSE');
+  assert.equal(await readFile(license, 'utf8'), 'license text');
+  assert.equal((await lstat(license)).isFile(), true);
+  assert.equal(await readFile(join(destination, 'bin', 'java-copy'), 'utf8'), 'executable');
+  if (process.platform !== 'win32') {
+    const originalMode = (await lstat(join(destination, 'bin', 'java'))).mode & 0o777;
+    assert.equal((await lstat(join(destination, 'bin', 'java-copy'))).mode & 0o777, originalMode);
+    assert.equal(originalMode & 0o111, 0o111);
+  }
+});
+
+test('TAR.GZ rejects unsafe links and conflicting members before writing archive files', async () => {
+  const dir = await tarTemp('tar-unsafe-links-');
+  const file = { name: 'pkg/file', content: 'safe' };
+  for (const [label, entries] of [
+    ['escape', [file, { name: 'pkg/link', type: '2', linkname: '../../escape' }]],
+    ['absolute', [file, { name: 'pkg/link', type: '2', linkname: '/etc/passwd' }]],
+    ['windows', [file, { name: 'pkg/link', type: '2', linkname: 'C:\\outside' }]],
+    ['dangling', [file, { name: 'pkg/link', type: '2', linkname: 'missing' }]],
+    ['chain', [file, { name: 'pkg/link', type: '2', linkname: 'file' }, { name: 'pkg/chain', type: '2', linkname: 'link' }]],
+    ['directory', [{ name: 'pkg/dir/', type: '5' }, { name: 'pkg/link', type: '2', linkname: 'dir' }]],
+    ['link-parent', [file, { name: 'pkg/link', type: '2', linkname: 'file' }, { name: 'pkg/link/payload', content: 'bad' }]],
+    ['duplicate', [file, { ...file, content: 'replacement' }]],
+    ['duplicate-link', [file, { name: 'pkg/file', type: '2', linkname: 'file' }]],
+    ['hardlink', [file, { name: 'pkg/link', type: '1', linkname: 'pkg/file' }]],
+    ['fifo', [file, { name: 'pkg/fifo', type: '6' }]],
+    ['sibling-package', [{ name: 'other/file', content: 'outside package' }, { name: '././pkg/link', type: '2', linkname: '../other/file' }]],
+  ]) {
+    const archive = join(dir, `${label}.tar.gz`), destination = join(dir, label);
+    await writeFile(archive, tarGz(entries));
+    await assert.rejects(extractTarGz(archive, destination), /unsafe|regular file|non-directory|duplicate|unsupported/, label);
+    assert.equal(existsSync(destination), false, `${label} must not be installed`);
+  }
+});
+
+test('a failed extraction reuses the checksum-verified download on the next runtime instance', async t => {
+  const root = await tarTemp('download-cache-');
+  const archive = tarGz([{ name: 'pkg/link', type: '2', linkname: '/outside' }]);
+  const checksum = createHash('sha256').update(archive).digest('hex');
+  let requests = 0;
+  const url = await server(t, (_req, res) => { requests++; res.end(archive); });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const runtime = new LocalNeo4j(root);
+    const cached = await runtime.download(`${url}/jre.tar.gz`, checksum);
+    await assert.rejects(extractTarGz(cached, join(root, 'jre')), /unsafe symbolic link/);
+  }
+  assert.equal(requests, 1);
+});
+
+test('extractArchive dispatches on the artifact kind', async () => {
+  const dir = await tarTemp('dispatch-');
+  const archive = join(dir, 'valid.tar.gz');
+  await writeFile(archive, tarGz([{ name: 'jre/bin/java', content: 'x' }]));
+  await extractArchive('tar.gz', archive, join(dir, 'jre'));
+  assert.equal(await readFile(join(dir, 'jre', 'bin', 'java'), 'utf8'), 'x');
+});
+test('runtime artifacts pin Windows archives and provide Linux tar archives', () => {
+  const win = runtimeArtifacts('win32-x64', {});
+  assert.equal(win.neo4j.archive, 'zip'); assert.match(win.neo4j.url, /-windows\.zip$/); assert.match(win.neo4j.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(win.jre.archive, 'zip'); assert.match(win.jre.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(win.neo4j.version, '5.26.30'); assert.equal(win.jre.version, '21.0.12.1+1');
+  const linux = runtimeArtifacts('linux-x64', {});
+  assert.equal(linux.neo4j.archive, 'tar.gz'); assert.match(linux.neo4j.url, /-unix\.tar\.gz$/); assert.match(linux.neo4j.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(linux.jre.archive, 'tar.gz'); assert.match(linux.jre.url, /_x64_linux_hotspot_.*\.tar\.gz$/); assert.match(linux.jre.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(runtimeArtifacts('darwin-x64', {}), undefined);
+  const mirror = runtimeArtifacts('linux-x64', { DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_URL: 'http://127.0.0.1:8080/neo4j.tar.gz', DSH_NEO4J_MEMORY_NEO4J_ARCHIVE_SHA256: 'A'.repeat(64) });
+  assert.equal(mirror.neo4j.url, 'http://127.0.0.1:8080/neo4j.tar.gz'); assert.equal(mirror.neo4j.sha256, 'a'.repeat(64));
+  assert.equal(mirror.jre.url, linux.jre.url);
+});
+test('default data root honours explicit overrides and the platform base directory', () => {
+  const keys = ['DSH_NEO4J_MEMORY_RUNTIME_DIR', 'DSH_NEO4J_MEMORY_DATA_DIR', 'XDG_DATA_HOME', 'LOCALAPPDATA'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    for (const key of keys) delete process.env[key];
+    process.env.DSH_NEO4J_MEMORY_RUNTIME_DIR = '/tmp/explicit-runtime';
+    assert.equal(defaultDataRoot(), resolve('/tmp/explicit-runtime'));
+    delete process.env.DSH_NEO4J_MEMORY_RUNTIME_DIR;
+    process.env.DSH_NEO4J_MEMORY_DATA_DIR = '/tmp/legacy-runtime';
+    assert.equal(defaultDataRoot(), resolve('/tmp/legacy-runtime'));
+    delete process.env.DSH_NEO4J_MEMORY_DATA_DIR;
+    if (process.platform === 'win32') {
+      process.env.LOCALAPPDATA = '/tmp/local-appdata';
+      assert.equal(defaultDataRoot(), resolve('/tmp/local-appdata/dsh-neo4j-memory'));
+    } else {
+      process.env.XDG_DATA_HOME = '/tmp/xdg-data';
+      assert.equal(defaultDataRoot(), resolve('/tmp/xdg-data/dsh-neo4j-memory'));
+    }
+  } finally {
+    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+  }
 });

@@ -5,10 +5,11 @@ import { join } from 'node:path';
 import { LocalNeo4j } from '../lib/runtime.js';
 import { MemoryConfig } from '../lib/config.js';
 import { MemoryService } from '../lib/service.js';
+import { scratchRoot, seedRuntime } from './fixtures/managed-runtime.mjs';
 
 test('isolated Neo4j: group alignment, event ownership, grouped expansion and reversible detach', { skip: process.env.DSH_NEO4J_MEMORY_INTEGRATION !== '1', timeout: 180000 }, async t => {
-  await mkdir('tmp', { recursive: true });
-  const root = await mkdtemp(join(process.cwd(), 'tmp', 'concept-groups-'));
+  const root = await scratchRoot('dsh-neo4j-concept-groups-');
+  await seedRuntime(root);
   const runtime = new LocalNeo4j(root);
   let service;
   t.after(async () => { await service?.close(); await runtime.stop(); });

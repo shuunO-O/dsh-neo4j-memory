@@ -1,4 +1,18 @@
 export declare const NEO4J_VERSION = "5.26.30", JRE_VERSION = "21.0.12.1+1";
+export type ArchiveKind = 'zip' | 'tar.gz';
+export interface RuntimeArtifact {
+    version: string;
+    url: string;
+    sha256: string;
+    archive: ArchiveKind;
+}
+export interface RuntimeArtifacts {
+    neo4j: RuntimeArtifact;
+    jre: RuntimeArtifact;
+}
+export declare function runtimeTarget(): string;
+/** Artifacts for a platform; URL and checksum may be overridden for mirrors or offline provisioning. */
+export declare function runtimeArtifacts(target?: string, env?: NodeJS.ProcessEnv): RuntimeArtifacts | undefined;
 export declare class RuntimeUnavailable extends Error {
 }
 export interface RuntimeInfo {
@@ -8,10 +22,17 @@ export interface RuntimeInfo {
     port: number;
     home: string;
 }
+export declare function processAlive(pid: number): boolean;
 export declare function defaultDataRoot(): string;
 export declare function portOpen(port: number): Promise<boolean>;
 export declare function guardArchivePath(root: string, name: string): string;
 export declare function extractZip(archive: string, destination: string): Promise<void>;
+/**
+ * Validate the archive before writing files. Internal file symlinks (used by Temurin)
+ * are copied after extraction, so no archive entry can write through a symlink.
+ */
+export declare function extractTarGz(archive: string, destination: string): Promise<void>;
+export declare function extractArchive(kind: ArchiveKind, archive: string, destination: string): Promise<void>;
 export declare class LocalNeo4j {
     private signal?;
     dataRoot: string;
@@ -42,6 +63,7 @@ export declare class LocalNeo4j {
     resolveJava(): Promise<string | undefined>;
     private homeReady;
     private download;
+    private assertSupportedPaths;
     private prepareInstall;
     prepare(): Promise<RuntimeInfo>;
     private choosePort;
@@ -51,6 +73,7 @@ export declare class LocalNeo4j {
     ensure(): Promise<RuntimeInfo>;
     private terminate;
     stop(): Promise<void>;
+    private runtimeVersion;
     status(): Promise<{
         installed: boolean;
         home: string;
